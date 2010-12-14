@@ -43,4 +43,4 @@ class TwitterProvider( FeedProvider ):
 
     def urls(self):
         return self.clue.takeUrls(r'twitter\.com/.')
-        
+    

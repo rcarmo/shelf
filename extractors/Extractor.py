@@ -47,6 +47,10 @@ class Extractor(object):
         print_info("Looking for people with email '%s'"%email)
         self.addClues( self._search_for( email, "Email" ), more_urls )
     
+    def clues_from_file( self, path ):
+      #MDItemCreate(None,path)
+      pass
+    
     def clues_from_url( self, url, more_urls = [] ):
         if not url: return
         if self.done: return

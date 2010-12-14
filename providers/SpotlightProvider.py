@@ -35,10 +35,12 @@ class SpotlightAtom( ProviderAtom ):
   
   def body(self):
     if not self.results: return None
-    body = []
+    html = []
     for r in self.results[:10]:
-      body.append('<p><a href="shelf:file://%s">%s</a></p>' % (r.valueForAttribute_('kMDItemPath'),r.valueForAttribute_('kMDItemDisplayName')))
-    return ''.join(body)
+      ago = time_ago_in_words(time.localtime(r.valueForAttribute_('kMDItemContentCreationDate').timeIntervalSince1970())) + " ago"
+      html.append(u'<span class="feed-date">%s</span>'% ago)
+      html.append('<p><a href="shelf:file://%s">%s</a></p>' % (r.valueForAttribute_('kMDItemPath'),r.valueForAttribute_('kMDItemDisplayName')))
+    return ''.join(html)
   
 # proxy NSObject class to receive notifications
 class queryProxy(NSObject):
@@ -58,7 +60,7 @@ class queryProxy(NSObject):
   
   def gotSpotlightData_(self, notification):
     query = notification.object()
-    print "Got %d results for %s." % (len(query.results()), self.predicate)
+    #print "Got %d results for %s." % (len(query.results()), self.predicate)
     self.atom.results = query.results()
     self.atom.changed()
 
