@@ -204,8 +204,7 @@ class ShelfController (NSWindowController):
         self.current_clue = None
 
         self.window().setLevel_( NSNormalWindowLevel ) # unstuff from 'on top'
-        self.window().setHidesOnDeactivate_( True ) # hide window if we have nothing
-
+        self.window().setHidesOnDeactivate_( NSUserDefaults.standardUserDefaults().boolForKey_("hideAppAutomatically") )
         self.nameView.setStringValue_( "" )
         self.companyView.setStringValue_( "" )
         self.imageView.setImage_( NSImage.imageNamed_("NSUser") )

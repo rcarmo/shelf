@@ -9,7 +9,7 @@ from distutils.core import setup
 import py2app
 from glob import glob
 
-version = "0.0.14" # update in Cache.py as well, for the User-Agent string
+version = "git HEAD" # update in Cache.py as well, for the User-Agent string
 
 plist = dict(
   CFBundleName="Shelf",
@@ -18,7 +18,7 @@ plist = dict(
   CFBundleIdentifier="org.jerakeen.pyshelf", # historical
   CFBundleShortVersionString=version,
   CFBundleVersion=version,
-  NSHumanReadableCopyright="Copyright 2008 Tom Insam",
+  NSHumanReadableCopyright="Copyright 2008-2010 Tom Insam. Modifications by Rui Carmo.",
 
   NSAppleScriptEnabled=True,
   CFBundleURLTypes=[
