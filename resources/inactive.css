@@ -1,0 +1,12 @@
+body {
+  background-color: #e4e4e4;
+}
+
+h3 {
+  border-top: 1px solid #cecece;
+  background: -webkit-gradient(linear, 0% 0%, 0% 100%, from(#dbdbdb), to(#818181));
+}
+
+h3 a {
+  text-shadow: 0px 1px 2px #808080;
+}

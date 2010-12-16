@@ -148,7 +148,7 @@ class Clue(object):
         content = "".join([ atom.content() for atom in atoms ])
         if content: return content
         
-        return "<p>thinking..</p>"
+        return "<p>thinking...</p>"
         
     # stop this clue from thinking soon. Tell all the providers to stop.
     def stop(self):

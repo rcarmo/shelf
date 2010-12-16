@@ -1,17 +1,16 @@
 * {
-    margin:0;
-    padding:0;
+  margin:0;
+  padding:0;
 }
 
 body {
-    font-family: "Lucida Grande";
-    font-size: 11px;
-    overflow-x: hidden; /* supress horizontal scrolling */
-    background-color: #dde4eb;
+  font-family: "Lucida Grande";
+  font-size: 11px;
+  overflow-x: hidden; /* supress horizontal scrolling */
 }
 
 p, img, pre {
-    margin: 5px 0 0 5px;
+  margin: 5px 0 0 5px;
 }
 
 /*
@@ -23,11 +22,9 @@ p, img, pre {
 */
 
 h3 {
-    padding: 1px 0 1px 5px;
-    margin-top: 10px;
-    border-top: 1px solid a1afce;
-    background: -webkit-gradient(linear, 0% 0%, 0% 100%, from(#b0bedb), to(#8194bc));
-    white-space: nowrap;
+  padding: 1px 0 1px 5px;
+  margin-top: 10px;
+  white-space: nowrap;
 }
 
 h3 a {
@@ -44,40 +41,40 @@ p a {
 }
 
 h3 a:hover, p a:hover {
-    text-decoration: underline;
+  text-decoration: underline;
 }
 
 h3 img.spinner {
-    margin: 0;
-    padding: 0;
-    float: right;
-    margin-right: 5px;
+  margin: 0;
+  padding: 0;
+  float: right;
+  margin-right: 5px;
 }
 
 h3 img.guess {
-    margin: 0;
-    padding: 0;
-    float: right;
-    margin-right: 5px;
+  margin: 0;
+  padding: 0;
+  float: right;
+  margin-right: 5px;
 }
 
 img.flickr-image {
-    width: 40px;
-    height: 40px;
-    float: left;
-    margin-right: 5px;
-    border: none;
+  width: 40px;
+  height: 40px;
+  float: left;
+  margin-right: 5px;
+  border: none;
 }
 
 span.feed-date {
-    float: right;
-    color: #444;
-    font-size: 80%;
-    margin-top: 5px;
+  float: right;
+  color: #444;
+  font-size: 80%;
+  margin-top: 5px;
 }
-    
+  
 p.feed-content {
-    color: #444;
-    font-size: 80%;
-    margin-top: 2px;
+  color: #444;
+  font-size: 80%;
+  margin-top: 2px;
 }

@@ -27,61 +27,57 @@ class ShelfController (NSWindowController):
     # component objects exist. Don't spend too long here, though, I think
     # the app icon is still bouncing.
     def awakeFromNib(self):
-        self.handlers = {}
-        self.current_clue = None
+      self.handlers = {}
+      self.current_clue = None
 
-        # get the RGB hex code of the system 'background' color.
-        bg = self.window().backgroundColor().colorUsingColorSpaceName_( NSCalibratedRGBColorSpace )
-        rgb = "%x%x%x"%(
-            bg.redComponent() * 255.999999,
-            bg.greenComponent() * 255.999999,
-            bg.blueComponent() * 255.999999
-        )
-        # TODO - ok. Now do something with this information. Specifically, get it into the CSS.
+      # get the RGB hex code of the system 'background' color.
+      bg = self.window().backgroundColor().colorUsingColorSpaceName_( NSCalibratedRGBColorSpace )
+      rgb = "%x%x%x"%(
+        bg.redComponent() * 255.999999,
+        bg.greenComponent() * 255.999999,
+        bg.blueComponent() * 255.999999
+      )
+      # TODO - ok. Now do something with this information. Specifically, get it into the CSS.
         
-        # evil. Alter the webkit view object so that it'll accept a clickthrough
-        # - this is very handy, as the window is on top and full of context.
-        # Alas, right now, the hover doesn't percolate through, so you don't
-        # get mouseover effects. But clicks work.
-        objc.classAddMethod( WebHTMLView, "acceptsFirstMouse:", lambda a,b: 1 )
-        # ps - when I say 'evil', I mean it. Really, _really_ evil. TODO -
-        # subclass the thing and do it properly.
+      # evil. Alter the webkit view object so that it'll accept a clickthrough
+      # - this is very handy, as the window is on top and full of context.
+      # Alas, right now, the hover doesn't percolate through, so you don't
+      # get mouseover effects. But clicks work.
+      objc.classAddMethod( WebHTMLView, "acceptsFirstMouse:", lambda a,b: 1 )
+      # ps - when I say 'evil', I mean it. Really, _really_ evil. TODO -
+      # subclass the thing and do it properly.
 
-        # create application support folder. The cache goes here. I suppose
-        # I should really keep it in a Cache folder somewhere
-        folder = os.path.join( os.environ['HOME'], "Library", "Application Support", "Shelf" )
-        if not os.path.exists( folder ):
-            os.mkdir( folder )
+      # create application support folder. The cache goes here. I suppose
+      # I should really keep it in a Cache folder somewhere
+      folder = os.path.join( os.environ['HOME'], "Library", "Application Support", "Shelf" )
+      if not os.path.exists( folder ):
+        os.mkdir( folder )
 
-
-
-        # Add a handler for the event GURL/GURL. One might think that
-        # Carbon.AppleEvents.kEISInternetSuite/kAEISGetURL would work,
-        # but the system headers (and hence the Python wrapper for those)
-        # are wrong.
-        manager = NSAppleEventManager.sharedAppleEventManager()
-
-        manager.setEventHandler_andSelector_forEventClass_andEventID_(
-            self, 'handleURLEvent:withReplyEvent:', fourCharToInt( "GURL" ), fourCharToInt( "GURL" ))
-
+      # Add a handler for the event GURL/GURL. One might think that
+      # Carbon.AppleEvents.kEISInternetSuite/kAEISGetURL would work,
+      # but the system headers (and hence the Python wrapper for those)
+      # are wrong.
+      manager = NSAppleEventManager.sharedAppleEventManager()
+      manager.setEventHandler_andSelector_forEventClass_andEventID_(
+        self, 'handleURLEvent:withReplyEvent:', fourCharToInt( "GURL" ), fourCharToInt( "GURL" ))
+      
+    
     # this is called once we're all launched. Bouncing all over now. 
     def applicationDidFinishLaunching_(self, sender):
-        # There's no initial context.
-        self.fade()
-
-        # start polling right away
-        self.performSelector_withObject_afterDelay_( 'poll', None, 0 )
-
-
+      # There's no initial context.
+      self.fade()
+      # start polling right away
+      self.performSelector_withObject_afterDelay_( 'poll', None, 0 )
+    
+    
     # we've been told to close
     def applicationWillTerminate_(self, sender):
-        # if we're doing anything in the background, stop it.
-        if self.current_clue:
-            self.current_clue.stop()
-
-        # kill the poller and any other long-running things
-        NSObject.cancelPreviousPerformRequestsWithTarget_( self )
-
+      # if we're doing anything in the background, stop it.
+      if self.current_clue:
+        self.current_clue.stop()
+      # kill the poller and any other long-running things
+      NSObject.cancelPreviousPerformRequestsWithTarget_( self )
+    
 
     # This is the callback from the little right-pointing arrow on the main
     # window, to the right of the person icon. Means 'open in address book'
@@ -189,8 +185,8 @@ class ShelfController (NSWindowController):
     # stop the window going away for another few seconds. That way, I don't
     # have to explicitly watch for 'nothing happened'.
     def deferFade(self, count = 5):
-        NSObject.cancelPreviousPerformRequestsWithTarget_selector_object_( self, "fade", None )
-        self.performSelector_withObject_afterDelay_('fade', None, count )
+      NSObject.cancelPreviousPerformRequestsWithTarget_selector_object_( self, "fade", None )
+      self.performSelector_withObject_afterDelay_('fade', None, count )
     
     # Put window into 'no context, fall to background' state, clear current state
     def fade(self):
@@ -222,7 +218,7 @@ class ShelfController (NSWindowController):
         self.companyView.setStringValue_( clue.companyName() )
         self.imageView.setImage_( clue.image() ) # does this leak?
         base = NSURL.fileURLWithPath_( NSBundle.mainBundle().resourcePath() )
-        self.setWebContent_( clue.content() ) # will initially be 'thinking..'
+        self.setWebContent_( clue.content() ) # will initially be 'thinking...'
         
         # always safe
         self.window().setHidesOnDeactivate_( False )
@@ -243,9 +239,10 @@ class ShelfController (NSWindowController):
 
 
     def kickClue(self):
-        if self.current_clue:
-            self.current_clue.start()
-
+      if self.current_clue:
+        self.current_clue.start()
+    
+    
     # called from the clue when it's updated itself and wants to add to the webview
     def updateWebContent_fromClue_(self, content, clue):
         # old clues may still expect to be able to update the data.
@@ -259,40 +256,38 @@ class ShelfController (NSWindowController):
         self.webView.mainFrame().loadHTMLString_baseURL_( """
             <html>
               <head>
-                <link rel="stylesheet" href="%s" type="text/css" />                
+                <link rel="stylesheet" href="%s" type="text/css" id="mode"/>                
+                <link rel="stylesheet" href="%s" type="text/css" id="generic"/>                
               </head>
               <body>
               %s
               <body>
             </html>
-        """%(
-            #"file:///Users/tomi/svn/Projects/Shelf/style.css?%s"%int(epoch_time()), # dev
-            "style.css", # live
-            html
-        ), base )
+        """ % ( "active.css", "style.css", html ), base )
 
     # supress the 'reload' item from the right-click menu - it makes no sense
     def webView_contextMenuItemsForElement_defaultMenuItems_( self, webview, element, items ):
-        return filter( lambda i: i.title() != "Reload", items )
-
+      return filter( lambda i: i.title() != "Reload", items )
+    
     # stolen from djangokit. When the webview wants to fetch a resource,
     # it means either 'I want a file off disk to serve this page' (ok, then)
     # or 'I want to follow this link' (no, I'll just get the system to do that).
     def webView_decidePolicyForNavigationAction_request_frame_decisionListener_( self, webview, action, request, frame, listener):
-        url = request.URL()
+      url = request.URL()
 
-        # serve files
-        if url.scheme() == 'file' or url.scheme() == 'about': # local files
-            listener.use()
-            return
+      # serve files
+      if url.scheme() == 'file' or url.scheme() == 'about': # local files
+        listener.use()
+        return
             
-        # everything else can be ignored, and opened by the system
-        listener.ignore()
-        NSWorkspace.sharedWorkspace().openURL_( url )
+      # everything else can be ignored, and opened by the system
+      listener.ignore()
+      NSWorkspace.sharedWorkspace().openURL_( url )
 
     def getDopplrToken_(self, sender):
-        url = "https://www.dopplr.com/api/AuthSubRequest?scope=http://www.dopplr.com&next=shelf://shelf/&session=1"
-        NSWorkspace.sharedWorkspace().openURL_( NSURL.URLWithString_(url) )
+      url = "https://www.dopplr.com/api/AuthSubRequest?scope=http://www.dopplr.com&next=shelf://shelf/&session=1"
+      NSWorkspace.sharedWorkspace().openURL_( NSURL.URLWithString_(url) )
+    
 
     def handleURLEvent_withReplyEvent_(self, event, replyEvent):
         theURL = event.descriptorForKeyword_(fourCharToInt('----'))
@@ -337,8 +332,15 @@ class ShelfController (NSWindowController):
         self.prefsWindow.makeKeyAndOrderFront_(self)
         alert.beginSheetModalForWindow_modalDelegate_didEndSelector_contextInfo_(
           self.prefsWindow, self, None, None)
+  
+    def applicationWillResignActive_(self, notification):
+      #self.webView.windowScriptObject().evaluateWebScript("document.getElementById('mode').href = 'inactive.css'")
+      print "Lost focus"
     
-
+    def applicationWillBecomeActive_(self, notification):
+      #self.webView.windowScriptObject().evaluateWebScript("document.getElementById('mode').href = 'active.css'")
+      print "Got focus"
+    
 def fourCharToInt(code):
-    return struct.unpack('>l', code)[0]
+  return struct.unpack('>l', code)[0]
 

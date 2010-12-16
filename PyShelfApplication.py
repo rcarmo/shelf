@@ -24,4 +24,3 @@ class PyShelfApplication(NSApplication):
                     self.delegate().hotKeyPressed()
 
         super(PyShelfApplication, self).sendEvent_(theEvent)
-
