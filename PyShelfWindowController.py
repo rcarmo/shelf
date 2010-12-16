@@ -38,6 +38,7 @@ class ShelfController (NSWindowController):
         bg.blueComponent() * 255.999999
       )
       # TODO - ok. Now do something with this information. Specifically, get it into the CSS.
+      self.css = "active.css"
         
       # evil. Alter the webkit view object so that it'll accept a clickthrough
       # - this is very handy, as the window is on top and full of context.
@@ -263,7 +264,7 @@ class ShelfController (NSWindowController):
               %s
               <body>
             </html>
-        """ % ( "active.css", "style.css", html ), base )
+        """ % ( self.css, "style.css", html ), base )
 
     # supress the 'reload' item from the right-click menu - it makes no sense
     def webView_contextMenuItemsForElement_defaultMenuItems_( self, webview, element, items ):
@@ -334,12 +335,12 @@ class ShelfController (NSWindowController):
           self.prefsWindow, self, None, None)
   
     def applicationWillResignActive_(self, notification):
-      #self.webView.windowScriptObject().evaluateWebScript("document.getElementById('mode').href = 'inactive.css'")
-      print "Lost focus"
+      self.css = "inactive.css"
+      self.webView.windowScriptObject().evaluateWebScript_("document.getElementById('mode').href = '%s'" % self.css)
     
     def applicationWillBecomeActive_(self, notification):
-      #self.webView.windowScriptObject().evaluateWebScript("document.getElementById('mode').href = 'active.css'")
-      print "Got focus"
+      self.css = "active.css"
+      self.webView.windowScriptObject().evaluateWebScript_("document.getElementById('mode').href = '%s'" % self.css)
     
 def fourCharToInt(code):
   return struct.unpack('>l', code)[0]
