@@ -15,15 +15,15 @@ class SpotlightAtom( ProviderAtom ):
         # query messages
         predicate = "(kMDItemContentType = 'com.apple.mail.emlx') && (" + \
          '||'.join(["((kMDItemAuthorEmailAddresses = '%s') || (kMDItemRecipientEmailAddresses = '%s'))" % (m, m) for m in clue.emails()]) + \
-         ")"
+        ")"
       else:
         # query attachments
         # exclude image, text and html files that are sometimes wrongly attached to emails
         exclusions = ['public.image','public.text']
         predicate = "(" + \
-        '&&'.join(["(kMDItemContentTypeTree != '%s')" % e for e in exclusions]) + \
-        ") && (" + \
-        '||'.join(["(kMDItemWhereFroms like '*%s*')" % m for m in clue.emails()]) + \
+          '&&'.join(["(kMDItemContentTypeTree != '%s')" % e for e in exclusions]) + \
+          ") && (" + \
+          '||'.join(["(kMDItemWhereFroms like '*%s*')" % m for m in clue.emails()]) + \
         ')'
       self.proxy = queryProxy.alloc().init()
       setattr(self.proxy, 'atom', self)
@@ -41,6 +41,7 @@ class SpotlightAtom( ProviderAtom ):
       html.append(u'<span class="feed-date">%s</span>'% ago)
       html.append('<p><a href="shelf:file://%s">%s</a></p>' % (r.valueForAttribute_('kMDItemPath'),r.valueForAttribute_('kMDItemDisplayName')))
     return ''.join(html)
+    self.results.release()
   
 # proxy NSObject class to receive notifications
 class queryProxy(NSObject):
@@ -61,7 +62,7 @@ class queryProxy(NSObject):
   def gotSpotlightData_(self, notification):
     query = notification.object()
     #print "Got %d results for %s." % (len(query.results()), self.predicate)
-    self.atom.results = query.results()
+    self.atom.results = query.results().retain()
     self.atom.changed()
 
 class SpotlightProvider( Provider ):

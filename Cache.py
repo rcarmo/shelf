@@ -48,29 +48,6 @@ def cleanCache():
     #LAST_CACHE_CLEAN = time()
 
   
-# ask Cocoa to query Spotlight and get back to us.
-def querySpotlightAndCallback(**params):
-    cleanCache()
-    emails = params['emails']
-    # exclude image, text and html files that are sometimes wrongly attached to emails
-    exclusions = ['public.image','public.text']
-    query = NSMetadataQuery.alloc().init()
-    # The easy bit - all e-mails where these addresses are seen
-    predicate = "((kMDItemContentType = 'com.apple.mail.emlx') && (" + \
-    '||'.join(["((kMDItemAuthorEmailAddresses = '%s') || (kMDItemRecipientEmailAddresses = '%s'))" % (m, m) for m in emails]) + \
-    ")"
-    predicate += "|| (" + \
-    '&&'.join(["(kMDItemContentTypeTree != '%s')" % e for e in exclusions]) + \
-    ") && (" + \
-    '||'.join(["(kMDItemWhereFroms like '*%s*')" % m for m in emails]) + \
-    '))'
-    print predicate
-    query.setPredicate_(NSPredicate.predicateWithFormat_(predicate))
-    query.setSortDescriptors_(NSArray.arrayWithObject_(NSSortDescriptor.alloc().initWithKey_ascending_('kMDItemContentCreationDate',False)))
-    NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(params['observer'], params['callback'], NSMetadataQueryDidFinishGatheringNotification, query)
-    query.startQuery()
-
-
 # ask Cocoa to download an url and get back to us. It pulls the file to disk
 # locally, and uses this as a cache, using mtime. The callback should be a
 # function that will be called at some time in the future, with 2 params -
@@ -100,7 +77,7 @@ class DownloadDelegate( NSObject ):
   def init(self):
     self = super(DownloadDelegate, self).init()
     if not self: return
-    # these are set above via setattr
+    # these are set via setattr
     self.callback = None
     self.failure = None
     self.url = None
@@ -154,10 +131,3 @@ class DownloadDelegate( NSObject ):
     if self.failure:
       self.failure( error )
   
-
-# incredibly evil - ignore https cert errors (doesn't work!)
-#from objc import Category
-#class NSURLRequest(Category(NSURLRequest)):
-#    @classmethod
-#    def allowsAnyHTTPSCertificateForHost_(cls, host):
-#        return True
