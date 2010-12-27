@@ -11,15 +11,6 @@ from glob import glob
 
 version = "git HEAD" # update in Cache.py as well, for the User-Agent string
 
-@converts(suffix=".framework.zip")
-def convert_xib(source, destination, dry_run=0):
-  destination = destination[:-4]
-  if dry_run:
-    return
-  p = subprocess.Popen(['unzip', destination, source])
-  p.wait()
-
-
 plist = dict(
   CFBundleName="Shelf",
   NSMainNibFile="MainMenu",
@@ -47,7 +38,7 @@ setup(
   options=dict(py2app=dict(
     plist=plist,
     iconfile="resources/Icon.icns",
-    frameworks=glob("*.framework.zip"),
+    frameworks=glob("*.framework"),
   )),
 )
 
