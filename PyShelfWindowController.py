@@ -29,7 +29,7 @@ class ShelfController (NSWindowController):
         the app icon is still bouncing. """
     self.handlers = {}
     self.current_clue = None
-
+    
     # get the RGB hex code of the system 'background' color.
     bg = self.window().backgroundColor().colorUsingColorSpaceName_( NSCalibratedRGBColorSpace )
     rgb = "%x%x%x"%(
@@ -62,75 +62,76 @@ class ShelfController (NSWindowController):
     # are wrong.
     manager = NSAppleEventManager.sharedAppleEventManager()
     manager.setEventHandler_andSelector_forEventClass_andEventID_(self, 'handleURLEvent:withReplyEvent:', fourCharToInt( "GURL" ), fourCharToInt("GURL"))
-    
-    def applicationDidFinishLaunching_(self, sender):
-      """ tominsam: this is called once we're all launched. Bouncing all over now. """
-      # There's no initial context.
-      self.fade()
-      # start polling right away
-      self.performSelector_withObject_afterDelay_('poll', None, 0)
   
-    def applicationWillTerminate_(self, sender):
-      """ tominsam: we've been told to close """
-      # if we're doing anything in the background, stop it.
-      if self.current_clue:
-        self.current_clue.stop()
-      # kill the poller and any other long-running things
-      NSObject.cancelPreviousPerformRequestsWithTarget_( self )
+    
+  def applicationDidFinishLaunching_(self, sender):
+    """ tominsam: this is called once we're all launched. Bouncing all over now. """
+    # There's no initial context.
+    self.fade()
+    # start polling right away
+    self.performSelector_withObject_afterDelay_('poll', None, 0)
+
+  def applicationWillTerminate_(self, sender):
+    """ tominsam: we've been told to close """
+    # if we're doing anything in the background, stop it.
+    if self.current_clue:
+      self.current_clue.stop()
+    # kill the poller and any other long-running things
+    NSObject.cancelPreviousPerformRequestsWithTarget_( self )
+    
+  def applicationWillResignActive_(self, notification):
+    self.css = "inactive.css"
+    self.webView.windowScriptObject().evaluateWebScript_("document.getElementById('mode').href = '%s'" % self.css)
+
+  def applicationWillBecomeActive_(self, notification):
+    """ rcarmo: we're gaining focus """
+    self.css = "active.css"
+    self.webView.windowScriptObject().evaluateWebScript_("document.getElementById('mode').href = '%s'" % self.css)
+
+  def openRecord_(self, thing):
+    """ tominsam: This is the callback from the little right-pointing arrow on the main
+        window, to the right of the person icon. Means 'open in address book' """
+    if self.current_clue:
+      NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_("addressbook://%s" % self.current_clue.uniqueId()))
+
+  def hotKeyPressed(self):
+    """ tominsam: TODO - this list here is a vage grab-bag of things I want to happen.
+        Should think about how we want to feedback on a deliberate poll, and how to fade the window. """
+    self.current_clue = None
+    self.fade()
+    self.deferFade(3) # cause the window to vanish again if we don'e find anything
+    self.window().setHidesOnDeactivate_(False)
+    self.showWindow_(self)
+    self.window().display()
+    self.window().orderFrontRegardless()
+    self.poll()
+
+  def handler_for( self, bundle ):
+    """ tominsam: return an Extractor class instance 
+        (confusingly called 'handler' for now. TODO - Must fix...)
+        for the app with the passed bundle name. """
+    if not bundle: return None
       
-    def applicationWillResignActive_(self, notification):
-      self.css = "inactive.css"
-      self.webView.windowScriptObject().evaluateWebScript_("document.getElementById('mode').href = '%s'" % self.css)
-
-    def applicationWillBecomeActive_(self, notification):
-      """ rcarmo: we're gaining focus """
-      self.css = "active.css"
-      self.webView.windowScriptObject().evaluateWebScript_("document.getElementById('mode').href = '%s'" % self.css)
- 
-    def openRecord_(self, thing):
-      """ tominsam: This is the callback from the little right-pointing arrow on the main
-          window, to the right of the person icon. Means 'open in address book' """
-      if self.current_clue:
-        NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_("addressbook://%s" % self.current_clue.uniqueId()))
-
-    def hotKeyPressed(self):
-      """ tominsam: TODO - this list here is a vage grab-bag of things I want to happen.
-          Should think about how we want to feedback on a deliberate poll, and how to fade the window. """
-      self.current_clue = None
-      self.fade()
-      self.deferFade(3) # cause the window to vanish again if we don'e find anything
-      self.window().setHidesOnDeactivate_(False)
-      self.showWindow_(self)
-      self.window().display()
-      self.window().orderFrontRegardless()
-      self.poll()
- 
-    def handler_for( self, bundle ):
-      """ tominsam: return an Extractor class instance 
-          (confusingly called 'handler' for now. TODO - Must fix...)
-          for the app with the passed bundle name. """
-      if not bundle: return None
-        
-      # haven't seen this application before? Look for a file on disk with
-      # the right name and load it.
-      if not bundle in self.handlers:
-        # convert bundlename to classname like 'ComAppleMail'
-        classname = re.sub(r'\.(\w)', lambda m: m.group(1).upper(), bundle )
-        classname = re.sub(r'^(\w)', lambda m: m.group(1).upper(), classname )    
-        print_info("** importing file for class %s"%( classname ))
-        try:
-          # this imports the module with the name 'clasname'.py as the local variable mod
-          mod = __import__(classname, globals(), locals(), [''])
-          # then get the single class attribute from that module object
-          cls = getattr( mod, classname )
-          # instantiate the class, and remember it so we don't do this again
-          self.handlers[ bundle ] = cls()
-        except ImportError:
-          import traceback
-          print_info( "** Couldn't import file for %s"%( classname ) )
-          print_info( traceback.format_exc () )
-          self.handlers[ bundle ] = None
-      return self.handlers[ bundle ]
+    # haven't seen this application before? Look for a file on disk with
+    # the right name and load it.
+    if not bundle in self.handlers:
+      # convert bundlename to classname like 'ComAppleMail'
+      classname = re.sub(r'\.(\w)', lambda m: m.group(1).upper(), bundle )
+      classname = re.sub(r'^(\w)', lambda m: m.group(1).upper(), classname )    
+      print_info("** importing file for class %s"%( classname ))
+      try:
+        # this imports the module with the name 'clasname'.py as the local variable mod
+        mod = __import__(classname, globals(), locals(), [''])
+        # then get the single class attribute from that module object
+        cls = getattr( mod, classname )
+        # instantiate the class, and remember it so we don't do this again
+        self.handlers[ bundle ] = cls()
+      except ImportError:
+        import traceback
+        print_info( "** Couldn't import file for %s"%( classname ) )
+        print_info( traceback.format_exc () )
+        self.handlers[ bundle ] = None
+    return self.handlers[ bundle ]
 
   def poll(self):
     """ tominsam: the main poll loop. Called regularly. """
@@ -182,7 +183,6 @@ class ShelfController (NSWindowController):
       self.current_clue.stop()
     self.current_clue = clue
     self.performSelector_withObject_afterDelay_('updateInfo', None, 0 )
-
     
   def deferFade(self, count = 5):
     """ fade the active context if we don't recieve any context for a while.
@@ -209,35 +209,35 @@ class ShelfController (NSWindowController):
     base = NSURL.fileURLWithPath_( NSBundle.mainBundle().resourcePath() )
     self.setWebContent_("")
 
-    def updateInfo(self):
-      """ put the window into 'I have context' state, display the header, and
-          tell the Clue object to start fetching state about itself. """
-      clue = self.current_clue
-      if not clue: return
-      clue.setDelegate_(self) # so the clue can send us 'I have updated' messages
+  def updateInfo(self):
+    """ put the window into 'I have context' state, display the header, and
+        tell the Clue object to start fetching state about itself. """
+    clue = self.current_clue
+    if not clue: return
+    clue.setDelegate_(self) # so the clue can send us 'I have updated' messages
 
-      self.nameView.setStringValue_( clue.displayName() )
-      self.companyView.setStringValue_( clue.companyName() )
-      self.imageView.setImage_( clue.image() ) # does this leak?
-      base = NSURL.fileURLWithPath_( NSBundle.mainBundle().resourcePath() )
-      self.setWebContent_( clue.content() ) # will initially be 'thinking...'
-      
-      # always safe
-      self.window().setHidesOnDeactivate_( False )
-      
-      if NSUserDefaults.standardUserDefaults().boolForKey_("bringAppForward"):
-        # slightly voodoo, this. But otherwise it doesn't seem 100% reliable
-        self.showWindow_(self)
-        self.window().orderFrontRegardless()
+    self.nameView.setStringValue_( clue.displayName() )
+    self.companyView.setStringValue_( clue.companyName() )
+    self.imageView.setImage_( clue.image() ) # does this leak?
+    base = NSURL.fileURLWithPath_( NSBundle.mainBundle().resourcePath() )
+    self.setWebContent_( clue.content() ) # will initially be 'thinking...'
+    
+    # always safe
+    self.window().setHidesOnDeactivate_( False )
+    
+    if NSUserDefaults.standardUserDefaults().boolForKey_("bringAppForward"):
+      # slightly voodoo, this. But otherwise it doesn't seem 100% reliable
+      self.showWindow_(self)
+      self.window().orderFrontRegardless()
 
-      if NSUserDefaults.standardUserDefaults().boolForKey_("alwaysOnTop"):
-        self.window().setLevel_( NSFloatingWindowLevel ) # 'on top'
+    if NSUserDefaults.standardUserDefaults().boolForKey_("alwaysOnTop"):
+      self.window().setLevel_( NSFloatingWindowLevel ) # 'on top'
 
-      self.window().display()
-      
-      # do this so we can return to the main runloop ASAP, so the
-      # webview has a chance to display something.
-      self.performSelector_withObject_afterDelay_('kickClue', None, 0 )
+    self.window().display()
+    
+    # do this so we can return to the main runloop ASAP, so the
+    # webview has a chance to display something.
+    self.performSelector_withObject_afterDelay_('kickClue', None, 0 )
 
   def kickClue(self):
     if self.current_clue:
