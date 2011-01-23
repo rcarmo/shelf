@@ -23,10 +23,10 @@ class ShelfController (NSWindowController):
   webView = objc.IBOutlet()
   prefsWindow = objc.IBOutlet()
 
-  # first-cut init goes here - we've been woken up, and all the GUI
-  # component objects exist. Don't spend too long here, though, I think
-  # the app icon is still bouncing.
   def awakeFromNib(self):
+    """ tominsam: first-cut init goes here - we've been woken up, and all the GUI
+        component objects exist. Don't spend too long here, though, I think
+        the app icon is still bouncing. """
     self.handlers = {}
     self.current_clue = None
 
@@ -37,10 +37,11 @@ class ShelfController (NSWindowController):
       bg.greenComponent() * 255.999999,
       bg.blueComponent() * 255.999999
     )
-    # TODO - ok. Now do something with this information. Specifically, get it into the CSS.
+    # tominsam: TODO - ok. Now do something with this information. Specifically, get it into the CSS.
+    # rcarmo: for now, I have these hardcoded into one of the stylesheets I switch between
     self.css = "active.css"
         
-    # evil. Alter the webkit view object so that it'll accept a clickthrough
+    # tominsam: evil. Alter the webkit view object so that it'll accept a clickthrough
     # - this is very handy, as the window is on top and full of context.
     # Alas, right now, the hover doesn't percolate through, so you don't
     # get mouseover effects. But clicks work.
@@ -48,86 +49,91 @@ class ShelfController (NSWindowController):
     # ps - when I say 'evil', I mean it. Really, _really_ evil. TODO -
     # subclass the thing and do it properly.
 
-    # create application support folder. The cache goes here. I suppose
+    # tominsam: create application support folder. The cache goes here. I suppose
     # I should really keep it in a Cache folder somewhere
-    folder = os.path.join( os.environ['HOME'], "Library", "Application Support", "Shelf" )
-    if not os.path.exists( folder ):
-      os.mkdir( folder )
+    folder = os.path.join(os.environ['HOME'], "Library", "Application Support", "Shelf")
+    if not os.path.exists(folder):
+      os.mkdir(folder)
+    # rcarmo: ~/Library/Caches/org.jerakeen.pyshelf is already being used, so I suppose this is a TODO for review
 
-    # Add a handler for the event GURL/GURL. One might think that
+    # tominsam: Add a handler for the event GURL/GURL. One might think that
     # Carbon.AppleEvents.kEISInternetSuite/kAEISGetURL would work,
     # but the system headers (and hence the Python wrapper for those)
     # are wrong.
     manager = NSAppleEventManager.sharedAppleEventManager()
-    manager.setEventHandler_andSelector_forEventClass_andEventID_(self, 'handleURLEvent:withReplyEvent:', fourCharToInt( "GURL" ), fourCharToInt( "GURL" ))
+    manager.setEventHandler_andSelector_forEventClass_andEventID_(self, 'handleURLEvent:withReplyEvent:', fourCharToInt( "GURL" ), fourCharToInt("GURL"))
     
+    def applicationDidFinishLaunching_(self, sender):
+      """ tominsam: this is called once we're all launched. Bouncing all over now. """
+      # There's no initial context.
+      self.fade()
+      # start polling right away
+      self.performSelector_withObject_afterDelay_('poll', None, 0)
   
-  # this is called once we're all launched. Bouncing all over now. 
-  def applicationDidFinishLaunching_(self, sender):
-    # There's no initial context.
-    self.fade()
-    # start polling right away
-    self.performSelector_withObject_afterDelay_( 'poll', None, 0 )
-  
-    
-  # we've been told to close
-  def applicationWillTerminate_(self, sender):
-    # if we're doing anything in the background, stop it.
-    if self.current_clue:
-      self.current_clue.stop()
-    # kill the poller and any other long-running things
-    NSObject.cancelPreviousPerformRequestsWithTarget_( self )
-  
-
-  # This is the callback from the little right-pointing arrow on the main
-  # window, to the right of the person icon. Means 'open in address book'
-  def openRecord_(self, thing):
-    if self.current_clue:
-      NSWorkspace.sharedWorkspace().openURL_(
-        NSURL.URLWithString_("addressbook://%s"%self.current_clue.uniqueId())
-      )
-
-  def hotKeyPressed(self):
-    # TODO - this list here is a vage grab-bag of things I want to happen.
-    # Should think about how we want to feedback on a deliberate poll,
-    # and how to fade the window.
-    self.current_clue = None
-    self.fade()
-    self.deferFade(3) # cause the window to vanish again if we don'e find anything
-    self.window().setHidesOnDeactivate_( False )
-    self.showWindow_(self)
-    self.window().display()
-    self.window().orderFrontRegardless()
-    self.poll()
-
-  # return an Extractor class instance (confusingly called 'handler' for now. Must fix..)
-  # for the app with the passed bundle name.
-  def handler_for( self, bundle ):
-    if not bundle: return None
-    
-    # haven't seen this application before? Look for a file on disk with
-    # the right name and load it.
-    if not bundle in self.handlers:
-      # convert bundlename to classname like 'ComAppleMail'
-      classname = re.sub(r'\.(\w)', lambda m: m.group(1).upper(), bundle )
-      classname = re.sub(r'^(\w)', lambda m: m.group(1).upper(), classname )
+    def applicationWillTerminate_(self, sender):
+      """ tominsam: we've been told to close """
+      # if we're doing anything in the background, stop it.
+      if self.current_clue:
+        self.current_clue.stop()
+      # kill the poller and any other long-running things
+      NSObject.cancelPreviousPerformRequestsWithTarget_( self )
       
-      print_info("** importing file for class %s"%( classname ))
-      try:
-        # this imports the module with the name 'clasname'.py as the local variable mod
-        mod = __import__(classname, globals(), locals(), [''])
-        # then get the single class attribute from that module object
-        cls = getattr( mod, classname )
-        # instantiate the class, and remember it so we don't do this again
-        self.handlers[ bundle ] = cls()
-      except ImportError, e:
-        print_info( "** Couldn't import file for %s: %s "%( classname, e ) )
-        self.handlers[ bundle ] = None
+    def applicationWillResignActive_(self, notification):
+      self.css = "inactive.css"
+      self.webView.windowScriptObject().evaluateWebScript_("document.getElementById('mode').href = '%s'" % self.css)
 
-    return self.handlers[ bundle ]
+    def applicationWillBecomeActive_(self, notification):
+      """ rcarmo: we're gaining focus """
+      self.css = "active.css"
+      self.webView.windowScriptObject().evaluateWebScript_("document.getElementById('mode').href = '%s'" % self.css)
+ 
+    def openRecord_(self, thing):
+      """ tominsam: This is the callback from the little right-pointing arrow on the main
+          window, to the right of the person icon. Means 'open in address book' """
+      if self.current_clue:
+        NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_("addressbook://%s" % self.current_clue.uniqueId()))
 
-  # the main poll loop. Called regularly.
+    def hotKeyPressed(self):
+      """ tominsam: TODO - this list here is a vage grab-bag of things I want to happen.
+          Should think about how we want to feedback on a deliberate poll, and how to fade the window. """
+      self.current_clue = None
+      self.fade()
+      self.deferFade(3) # cause the window to vanish again if we don'e find anything
+      self.window().setHidesOnDeactivate_(False)
+      self.showWindow_(self)
+      self.window().display()
+      self.window().orderFrontRegardless()
+      self.poll()
+ 
+    def handler_for( self, bundle ):
+      """ tominsam: return an Extractor class instance 
+          (confusingly called 'handler' for now. TODO - Must fix...)
+          for the app with the passed bundle name. """
+      if not bundle: return None
+        
+      # haven't seen this application before? Look for a file on disk with
+      # the right name and load it.
+      if not bundle in self.handlers:
+        # convert bundlename to classname like 'ComAppleMail'
+        classname = re.sub(r'\.(\w)', lambda m: m.group(1).upper(), bundle )
+        classname = re.sub(r'^(\w)', lambda m: m.group(1).upper(), classname )    
+        print_info("** importing file for class %s"%( classname ))
+        try:
+          # this imports the module with the name 'clasname'.py as the local variable mod
+          mod = __import__(classname, globals(), locals(), [''])
+          # then get the single class attribute from that module object
+          cls = getattr( mod, classname )
+          # instantiate the class, and remember it so we don't do this again
+          self.handlers[ bundle ] = cls()
+        except ImportError:
+          import traceback
+          print_info( "** Couldn't import file for %s"%( classname ) )
+          print_info( traceback.format_exc () )
+          self.handlers[ bundle ] = None
+      return self.handlers[ bundle ]
+
   def poll(self):
+    """ tominsam: the main poll loop. Called regularly. """
     print_info( "\n---- poll start ----" )
     
     # First thing I do, schedule the next poll event, so that I can just return with impunity from this function
@@ -159,13 +165,11 @@ class ShelfController (NSWindowController):
     self.performSelector_withObject_afterDelay_("lookForCluesWith:", handler, 0)
 
   def lookForCluesWith_( self, handler ):
-    # tell the handler to look for clues. Pass it 'self' so that it
-    # can call us back
+    """ tell the handler to look for clues. Pass it 'self' so that it can call us back """
     handler.getClue(self)
 
-
-  # callback from getClue on the handler function
   def gotClue(self, clue):
+    """ # callback from getClue on the handler function """
     self.deferFade() # put off the context fade
 
     if self.current_clue and self.current_clue == clue:
@@ -180,36 +184,34 @@ class ShelfController (NSWindowController):
     self.performSelector_withObject_afterDelay_('updateInfo', None, 0 )
 
     
-  # fade the active context if we don't recieve any context for a while.
-  # call this method every time something interesting happens, and it'll
-  # stop the window going away for another few seconds. That way, I don't
-  # have to explicitly watch for 'nothing happened'.
   def deferFade(self, count = 5):
+    """ fade the active context if we don't recieve any context for a while.
+        call this method every time something interesting happens, and it'll
+        stop the window going away for another few seconds. That way, I don't
+        have to explicitly watch for 'nothing happened'. """
     NSObject.cancelPreviousPerformRequestsWithTarget_selector_object_( self, "fade", None )
     self.performSelector_withObject_afterDelay_('fade', None, count )
     
-  # Put window into 'no context, fall to background' state, clear current state
   def fade(self):
+    """ Put window into 'no context, fall to background' state, clear current state """
     if NSUserDefaults.standardUserDefaults().boolForKey_("useHotkey") and self.current_clue:
       # if we're hotkey driven, don't passively fade ever
       return
-
     print_info("fading...")
     if self.current_clue:
       self.current_clue.stop()
     self.current_clue = None
-
     self.window().setLevel_( NSNormalWindowLevel ) # unstuff from 'on top'
     self.window().setHidesOnDeactivate_( NSUserDefaults.standardUserDefaults().boolForKey_("hideAppAutomatically") )
     self.nameView.setStringValue_( "" )
     self.companyView.setStringValue_( "" )
     self.imageView.setImage_( NSImage.imageNamed_("NSUser") )
     base = NSURL.fileURLWithPath_( NSBundle.mainBundle().resourcePath() )
-    self.setWebContent_( "" )
+    self.setWebContent_("")
 
-    # put the window into 'I have context' state, display the header, and
-    # tell the Clue object to start fetching state about itself.
     def updateInfo(self):
+      """ put the window into 'I have context' state, display the header, and
+          tell the Clue object to start fetching state about itself. """
       clue = self.current_clue
       if not clue: return
       clue.setDelegate_(self) # so the clue can send us 'I have updated' messages
@@ -237,23 +239,20 @@ class ShelfController (NSWindowController):
       # webview has a chance to display something.
       self.performSelector_withObject_afterDelay_('kickClue', None, 0 )
 
-
   def kickClue(self):
     if self.current_clue:
       self.current_clue.start()
     
-    
-  # called from the clue when it's updated itself and wants to add to the webview
   def updateWebContent_fromClue_(self, content, clue):
+    """ called from the clue when it's updated itself and wants to add to the webview """
     # old clues may still expect to be able to update the data.
     if clue == self.current_clue:
       self.setWebContent_( content )
 
   def setWebContent_(self, html):
-    # the base path of the webview is the resource folder, so I can use
-    # relative paths to refer to the CSS.
+    """ the base path of the webview is the resource folder, so I can use relative paths to refer to the CSS. """
     base = NSURL.fileURLWithPath_( NSBundle.mainBundle().resourcePath() )
-    self.webView.mainFrame().loadHTMLString_baseURL_( """
+    self.webView.mainFrame().loadHTMLString_baseURL_("""
       <html>
         <head>
           <link rel="stylesheet" href="%s" type="text/css" id="mode"/>                
@@ -263,23 +262,21 @@ class ShelfController (NSWindowController):
         %s
         <body>
       </html>
-    """ % ( self.css, "style.css", html ), base )
+    """ % (self.css,"style.css",html), base)
 
-  # supress the 'reload' item from the right-click menu - it makes no sense
-  def webView_contextMenuItemsForElement_defaultMenuItems_( self, webview, element, items ):
+  def webView_contextMenuItemsForElement_defaultMenuItems_(self, webview, element, items):
+    """ supress the 'reload' item from the right-click menu - it makes no sense """
     return filter( lambda i: i.title() != "Reload", items )
     
-  # stolen from djangokit. When the webview wants to fetch a resource,
-  # it means either 'I want a file off disk to serve this page' (ok, then)
-  # or 'I want to follow this link' (no, I'll just get the system to do that).
   def webView_decidePolicyForNavigationAction_request_frame_decisionListener_( self, webview, action, request, frame, listener):
+    """ tominsam: stolen from djangokit. When the webview wants to fetch a resource,
+        it means either 'I want a file off disk to serve this page' (ok, then)
+        or 'I want to follow this link' (no, I'll just get the system to do that). """
     url = request.URL()
-
     # serve files
     if url.scheme() == 'file' or url.scheme() == 'about': # local files
       listener.use()
       return
-        
     # everything else can be ignored, and opened by the system
     listener.ignore()
     NSWorkspace.sharedWorkspace().openURL_( url )
@@ -314,28 +311,19 @@ class ShelfController (NSWindowController):
       alert.beginSheetModalForWindow_modalDelegate_didEndSelector_contextInfo_(self.prefsWindow, self, None, None)
 
 
-    def gotDopplrToken(self, data, stale):
-      matches = re.search(r'Token=(.*)', data)
-      if matches:
-        token = matches.group(1)
-        NSUserDefaults.standardUserDefaults().setObject_forKey_(token, "dopplrToken")
-        NSUserDefaults.standardUserDefaults().synchronize()
-        alert = NSAlert.alertWithMessageText_defaultButton_alternateButton_otherButton_informativeTextWithFormat_("Shelf", "Continue", None, None, "Got a Dopplr token!")
-      else:
-        alert = NSAlert.alertWithMessageText_defaultButton_alternateButton_otherButton_informativeTextWithFormat_("Shelf", "Continue", None, None, "Failed to get token - sorry.")
-
-      self.prefsWindow.display()
-      self.prefsWindow.makeKeyAndOrderFront_(self)
-      alert.beginSheetModalForWindow_modalDelegate_didEndSelector_contextInfo_(self.prefsWindow, self, None, None)
-  
-  def applicationWillResignActive_(self, notification):
-    self.css = "inactive.css"
-    self.webView.windowScriptObject().evaluateWebScript_("document.getElementById('mode').href = '%s'" % self.css)
-    
-  def applicationWillBecomeActive_(self, notification):
-    self.css = "active.css"
-    self.webView.windowScriptObject().evaluateWebScript_("document.getElementById('mode').href = '%s'" % self.css)
-    
+  def gotDopplrToken(self, data, stale):
+    matches = re.search(r'Token=(.*)', data)
+    if matches:
+      token = matches.group(1)
+      NSUserDefaults.standardUserDefaults().setObject_forKey_(token, "dopplrToken")
+      NSUserDefaults.standardUserDefaults().synchronize()
+      alert = NSAlert.alertWithMessageText_defaultButton_alternateButton_otherButton_informativeTextWithFormat_("Shelf", "Continue", None, None, "Got a Dopplr token!")
+    else:
+      alert = NSAlert.alertWithMessageText_defaultButton_alternateButton_otherButton_informativeTextWithFormat_("Shelf", "Continue", None, None, "Failed to get token - sorry.")
+    self.prefsWindow.display()
+    self.prefsWindow.makeKeyAndOrderFront_(self)
+    alert.beginSheetModalForWindow_modalDelegate_didEndSelector_contextInfo_(self.prefsWindow, self, None, None)
+      
 def fourCharToInt(code):
   return struct.unpack('>l', code)[0]
 

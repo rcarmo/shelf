@@ -2,48 +2,30 @@ from ScriptingBridge import *
 from Extractor import *
 import urlparse
 from Utilities import *
-from xml.etree.ElementTree import ElementTree
 
-class ComAppleSafari(Extractor):
+class ComGoogleChrome(Extractor):
 
     def __init__(self):
-        super( ComAppleSafari, self ).__init__()
-        self.safari = SBApplication.applicationWithBundleIdentifier_("com.apple.safari")
+        super( ComGoogleChrome, self ).__init__()
+        self.chrome = SBApplication.applicationWithBundleIdentifier_("com.google.Chrome")
 
     def clues(self):
         clues = []
-        if not self.safari.windows().count(): return
+        if not self.chrome.windows().count(): return
 
         # window 0 is always the foreground window? Seems it.
-        tab = self.safari.windows()[ 0 ].currentTab()
-        if not tab.exists(): return # foreground window is not a browser window.
+        tab = self.chrome.windows()[ 0 ].activeTab()
+        
+        # this is in one version of the chome API, but not others.
+        if hasattr(tab, "exists"):
+            if not tab.exists(): return # foreground window is not a browser window.
         
         self.clues_from_url( tab.URL() )
-        if self.done: return
+        if self.done:
+            return
 
-        if re.match( r'https://www.google.com/reader/', unicode(tab.URL()) ):
-            # google reader. Try to investigate current item.
-            js = """
-                var link = null;
-                var n = document.getElementById('entries').childNodes;
-                for (var i = 0; i < n.length; i++) {
-                    if (/expanded/.test(n[i].className)) {
-                        var l = n[i];
-                        var a = l.getElementsByClassName("entry-title-link")[0];
-                        if (a) {
-                            link = a.href;
-                            break;
-                        }
-                    }
-                }
-                link;
-            """
-            link = self.safari.doJavaScript_in_(js, self.safari.windows()[0].currentTab())
-            if link:
-                self.clues_from_url( link )
-                if self.done: return
-
-        if tab.source():
+        # this is in one version of the chome API, but not others.
+        if hasattr(tab, "source") and tab.source():
             # look for microformats
             self.clues_from_html( tab.source(), tab.URL() )
             if self.done: return
@@ -81,3 +63,4 @@ class RelMeParser(SGMLParser):
     def do_a( self, attrs ):
         if not ('rel', 'me') in attrs: return
         self.hrefs += filter( lambda l: re.match(r'http', l), [e[1] for e in attrs if e[0]=='href'] )
+
