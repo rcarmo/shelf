@@ -23,7 +23,8 @@ h3 a {
 }
 
 .accordion li:first-of-type {
-	border-left: 1px solid #c2c2c2;
+	border: 1px solid #c2c2c2;
+	-webkit-border-radius:10px 0 0 10px;
 }
 
 .accordion li {

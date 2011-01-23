@@ -31,7 +31,8 @@ h3 a {
 }
 
 .accordion li:first-of-type {
-	border-left: 1px solid #6d95e0;
+	-webkit-border-radius:10px 0 0 10px;
+	border: 1px solid #6d95e0;
 }
 .accordion li {
   background-color: #bbcef1;
