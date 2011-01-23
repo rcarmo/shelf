@@ -36,10 +36,20 @@ class SpotlightAtom( ProviderAtom ):
   def body(self):
     if not self.results: return None
     html = []
-    for r in self.results[:10]:
-      ago = time_ago_in_words(time.localtime(r.valueForAttribute_('kMDItemContentCreationDate').timeIntervalSince1970())) + " ago"
-      html.append(u'<span class="feed-date">%s</span>'% ago)
-      html.append('<p><a href="shelf:file://%s">%s</a></p>' % (r.valueForAttribute_('kMDItemPath'),r.valueForAttribute_('kMDItemDisplayName')))
+    paths = []
+    bound = 10
+    for r in self.results:
+      if not bound: break
+      path = r.valueForAttribute_('kMDItemPath')
+      name = r.valueForAttribute_('kMDItemDisplayName')
+      ago = time_ago_in_words(time.localtime(r.valueForAttribute_('kMDItemContentCreationDate').timeIntervalSince1970()))
+      if path not in paths: # skip duplicates
+        paths.append[path]
+      else:
+        continue
+      bound -= 1
+      html.append(u'<span class="feed-date">%(ago)s</span>' % locals())
+      html.append(u'<p><a href="shelf:file://%(path)s">%(name)s</a></p>' % locals())
     return ''.join(html)
     self.results.release()
   

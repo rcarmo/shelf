@@ -68,7 +68,7 @@ class LastFmAtom( ProviderAtom ):
         html = ""
 
         for track in self.tracks:
-            ago = time_ago_in_words(gmtime(track['date'])) + " ago"
+            ago = time_ago_in_words(gmtime(track['date']))
             html += u'<span class="feed-date">%s</span>'%ago
 
             html += "<a href='%s'><img src='%s' class='flickr-image'></a>"%( track['link'], track['art'] )

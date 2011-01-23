@@ -115,46 +115,42 @@ def distance_of_time_in_words(from_time, to_time=0, include_seconds=False):
         if include_seconds:
             for remainder in [5, 10, 20]:
                 if distance_in_seconds < remainder:
-                    return "less than %s seconds" % remainder
+                    return "%ss" % remainder
             if distance_in_seconds < 40:
-                return "half a minute"
+                return "~30s"
             elif distance_in_seconds < 60:
-                return "less than a minute"
+                return "<1m"
             else:
-                return "1 minute"
+                return "1m"
         else:
             if distance_in_minutes == 0:
-                return "less than a minute"
+                return "<1m"
             else:
-                return "1 minute"
+                return "1m"
     elif distance_in_minutes < 45:
-        return "%s minutes" % distance_in_minutes
+        return "%sm" % distance_in_minutes
     elif distance_in_minutes < 90:
-        return "about 1 hour"
+        return "~1h"
     elif distance_in_minutes < 1440:
-        return "about %d hours" % (round(distance_in_minutes / 60.0))
+        return "~%dh" % (round(distance_in_minutes / 60.0))
     elif distance_in_minutes < 2880:
-        return "1 day"
+        return "1d"
     elif distance_in_minutes < 43220:
-        return "%d days" % (round(distance_in_minutes / 1440))
+        return "%dd" % (round(distance_in_minutes / 1440))
     elif distance_in_minutes < 86400:
-        return "about 1 month"
+        return "~1 month"
     elif distance_in_minutes < 525600:
         return "%d months" % (round(distance_in_minutes / 43200))
     elif distance_in_minutes < 1051200:
-        return "about 1 year"
+        return "~1 year"
     else:
-        return "over %d years" % (round(distance_in_minutes / 525600))
+        return ">%d years" % (round(distance_in_minutes / 525600))
 
 def time_ago_in_words(from_time, include_seconds=False):
     """
     Like distance_of_time_in_words, but where ``to_time`` is fixed to ``datetime.now()``.
     """
     ago = distance_of_time_in_words(from_time, datetime.utcnow(), include_seconds)
-    # TODO - think about these. The output from the function is Too Damn Long, is all.
-    ago = re.sub(r'^about ', '~', ago )
-    ago = re.sub(r'minute', 'min', ago )
-    ago = re.sub(r'second', 'sec', ago )
     return ago
 
 __all__ = ['as_dump', 'as_app', 'print_info', 'html_escape', 'normalize_url','distance_of_time_in_words', 'time_ago_in_words']

@@ -1,3 +1,11 @@
+/*
+  Standard mail.app sidebar colors:
+  #dde4eb - light blue background
+  #a1afce - border-top of selected item (which turns to white text with 1px vertical shadow)
+  #b0bedb - top value of gradient
+  #8194bc - bottom value of gradient
+*/
+
 body {
   background-color: #dde4eb;
 }

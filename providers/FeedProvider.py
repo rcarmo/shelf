@@ -127,7 +127,7 @@ class FeedAtom(ProviderAtom):
             
             if date:
                 #html += u'<span class="feed-date">%s</span>'%( time.strftime("%b %d", date ) )
-                ago = time_ago_in_words(date) + " ago"
+                ago = time_ago_in_words(date)
                 html += u'<span class="feed-date">%s</span>'%ago
             title = 'title' in item and item.title or "untitled"
 

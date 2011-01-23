@@ -27,7 +27,7 @@ class TwitterAtom( FeedAtom ):
         elif 'updated_parsed' in item: date = item.updated_parsed
         if date:
             #html += u'<span class="feed-date">%s</span>'%( time.strftime("%b %d", date ) )
-            ago = time_ago_in_words(date) + " ago"
+            ago = time_ago_in_words(date)
             html += u'<span class="feed-date">%s</span>'%ago
         
         html += '<p>%s</p>'%( item.title )
