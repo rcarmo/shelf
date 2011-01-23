@@ -152,3 +152,36 @@ p.feed-content {
 
     text-shadow: rgba(255, 255, 255, 0.3) 0px 1px;
 }
+
+.accordion {
+  overflow:hidden;
+  list-style:none;
+}
+.accordion li {
+  float:left;
+  width: 10%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 2px;
+}
+.accordion li:first-of-type {
+  -webkit-border-radius:10px 0 0 10px;
+  padding-left: 4px;
+}
+.accordion li:last-of-type {
+  -webkit-border-radius:0 10px 10px 0;
+  padding-right: 4px;
+}
+.accordion:hover li {
+  width: 10%;
+}
+.accordion li:hover {
+  width: auto;
+  padding-left: 4px;
+  padding-right: 4px;
+  background-color: #bbcef1;
+}
+.accordion li a:hover {
+	text-decoration: none;
+	color: black;
+}

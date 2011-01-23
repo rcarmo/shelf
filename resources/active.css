@@ -18,3 +18,21 @@ h3 {
 h3 a {
   text-shadow: 0px 1px 2px #727272;
 }
+
+.accordion li {
+	border-top: 1px solid #6d95e0;
+	border-bottom: 1px solid #6d95e0;
+	border-right: 1px solid #6d95e0;
+	color: #6d95e0;
+}
+
+.accordion li a {
+	color: #6d95e0;
+}
+
+.accordion li:first-of-type {
+	border-left: 1px solid #6d95e0;
+}
+.accordion li {
+  background-color: #bbcef1;
+}

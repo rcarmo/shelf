@@ -14,13 +14,13 @@ class BasicAtom( ProviderAtom ):
         content = ""
 
         if clue.emails():
-            content += "<p>"
+            content += '<ul class="accordion">'
             for email in clue.emails():
-                content += "<a href='mailto:%s'>%s</a> "%( email, email )
-            content += "</p>"
+                content += '<li><a href="mailto:%(email)s">%(email)s</a></li>' % locals()
+            content += '</ul>'
 
         if clue.birthday():
-            content += "<p>Born %s</p>"%time.strftime("%B %d, %Y", clue.birthday())
+            content += '<p>Born %s</p>' % time.strftime("%B %d, %Y", clue.birthday())
 
         addresses = clue.addresses()
         if len(addresses) > 0:
