@@ -1,0 +1,1 @@
+This is a fork from the original Shelf by Tom Insam, where I try out new stuff before pushing it back to his source tree. To build, use the Makefile.
