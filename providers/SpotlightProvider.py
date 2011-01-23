@@ -44,7 +44,7 @@ class SpotlightAtom( ProviderAtom ):
       name = r.valueForAttribute_('kMDItemDisplayName')
       ago = time_ago_in_words(time.localtime(r.valueForAttribute_('kMDItemContentCreationDate').timeIntervalSince1970()))
       if path not in paths: # skip duplicates
-        paths.append[path]
+        paths.append(path)
       else:
         continue
       bound -= 1
