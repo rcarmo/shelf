@@ -2,24 +2,31 @@
 
 PYTHON ?= python
 
-frameworks: Sparkle.framework
-
-Sparkle.framework: Sparkle.framework.zip
-	# expand Sparkle correctly, resource forks and all, using Archive Helper
-	open Sparkle.framework.zip
+# EVIL EVIL EVIL
+VERSION = $(shell grep 'version =' setup.py | cut -d'"' -f 2)
 
 .PHONY: all
-all: dev
+all: dist
 	@ :
 
 .PHONY: dev
-dev: frameworks
+dev:
+	@echo -
+	@echo - dev build will not work under Snow Leopard unless you\'ve fixed your local build!!
+	@echo -
 	$(PYTHON) setup.py py2app -A
 
 .PHONY: dist
-dist: frameworks
+dist:
 	$(PYTHON) setup.py py2app
+
+.PHONY: zip
+zip:
+	cd dist && rm -f Shelf-$(VERSION).zip
+	cd dist && zip -r9 Shelf-$(VERSION).zip Shelf.app/
+	du -k dist/*.zip
 
 .PHONY: clean
 clean:
-	rm -rf build dist Sparkle.framework Growl.framework
+	rm -rf build dist
+
