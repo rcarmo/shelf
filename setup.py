@@ -32,6 +32,8 @@ plist = dict(
   SUFeedURL="http://code.movieos.org/shelf/appcast/" # doesn't exist, but it's a thing at least.
 )
 
+# TODO: open Growl.framework.zip, move the resulting folder into the right place in dist, etc.
+
 setup(
   app=["main.py",],
   data_files= glob("resources/*.nib") + glob("resources/*.html") + glob("resources/*.gif") + glob("*.py") + glob("*/*.py") + glob("resources/*.css") + glob("resources/*.png"),

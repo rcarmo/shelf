@@ -2,6 +2,8 @@ from ScriptingBridge import *
 from Extractor import *
 from Utilities import *
 
+# TODO: change this for the case where we're looking at a message thread in Lion.
+
 class ComAppleMail( Extractor ):
 
     def __init__(self):

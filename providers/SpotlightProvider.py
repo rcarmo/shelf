@@ -5,6 +5,8 @@ from Utilities import *
 import time
 import Cache
 
+ignore_files = ['smime.p7s']
+
 class SpotlightAtom( ProviderAtom ):
   def __init__(self, provider, url):
     ProviderAtom.__init__( self, provider, url )
@@ -43,6 +45,8 @@ class SpotlightAtom( ProviderAtom ):
       path = r.valueForAttribute_('kMDItemPath')
       name = r.valueForAttribute_('kMDItemDisplayName')
       ago = time_ago_in_words(time.localtime(r.valueForAttribute_('kMDItemContentCreationDate').timeIntervalSince1970()))
+      if name in ignore_files:
+          continue
       if path not in paths: # skip duplicates
         paths.append(path)
       else:

@@ -8,16 +8,10 @@ class TwitterAtom( FeedAtom ):
     def specialCaseFeedUrl( self, url ):
         # deriving the feed url from the username is faster than
         # fetching the HTML first.
-        username = re.search(r'twitter\.com/([^/]+)', url).group(1)
+        username = re.search(r'twitter\.com/(\#\!\/)*([^/]+)', url).group(2)
         if username == 'home': return ""
         return "http://twitter.com/statuses/user_timeline/%s.atom"%(username)
     
-    def username(self):
-        return NSUserDefaults.standardUserDefaults().stringForKey_("twitterUsername")
-    
-    def password(self):
-        NSUserDefaults.standardUserDefaults().stringForKey_("twitterPassword")
-
     def htmlForFeed( self, url, feed, stale = False ):
         item = feed.entries[0]
         html = ""

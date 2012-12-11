@@ -138,13 +138,13 @@ def distance_of_time_in_words(from_time, to_time=0, include_seconds=False):
     elif distance_in_minutes < 43220:
         return "%dd" % (round(distance_in_minutes / 1440))
     elif distance_in_minutes < 86400:
-        return "~1 month"
+        return "~1 mth"
     elif distance_in_minutes < 525600:
-        return "%d months" % (round(distance_in_minutes / 43200))
+        return "%d mths" % (round(distance_in_minutes / 43200))
     elif distance_in_minutes < 1051200:
-        return "~1 year"
+        return "~1 y"
     else:
-        return ">%d years" % (round(distance_in_minutes / 525600))
+        return ">%d y" % (round(distance_in_minutes / 525600))
 
 def time_ago_in_words(from_time, include_seconds=False):
     """
