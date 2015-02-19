@@ -1,7 +1,7 @@
 import objc
 from AddressBook import *
 
-import re
+import sys,re
 from time import time, gmtime
 from urllib import quote
 import json

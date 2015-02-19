@@ -11,6 +11,7 @@ import objc
 import Foundation
 import AppKit
 import os
+import sys
 from AppKit import *
 from PyObjCTools import AppHelper
 
@@ -24,11 +25,6 @@ import ScriptingBridge
 import urlparse
 import json
 import WebKit
-
-# import sparkle framework
-base_path = os.path.join(os.path.dirname(os.getcwd()), 'Frameworks')
-bundle_path = os.path.abspath(os.path.join(base_path, 'Sparkle.framework'))
-#objc.loadBundle('Sparkle', globals(), bundle_path=bundle_path)
 
 NSUserDefaults.standardUserDefaults().registerDefaults_({
     'googleSocial':False,
