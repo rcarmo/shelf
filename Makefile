@@ -1,23 +1,38 @@
-# wrapper Makefile for py2app invocation and cleaning
+# Native Swift app build plus the original py2app targets.
 
 PYTHON ?= python
 
-# EVIL EVIL EVIL
 VERSION = $(shell grep 'version =' setup.py | cut -d'"' -f 2)
 
 .PHONY: all
-all: dist
+all: native-app
 	@ :
 
-.PHONY: dev
-dev:
+.PHONY: native-build
+native-build:
+	swift build
+
+.PHONY: native-release
+native-release:
+	swift build -c release
+
+.PHONY: native-run
+native-run:
+	swift run Shelf
+
+.PHONY: native-app
+native-app:
+	scripts/build-native-app.sh
+
+.PHONY: legacy-dev
+legacy-dev:
 	@echo -
 	@echo - dev build will not work under Snow Leopard unless you\'ve fixed your local build!!
 	@echo -
 	$(PYTHON) setup.py py2app -A
 
-.PHONY: dist
-dist:
+.PHONY: legacy-dist
+legacy-dist:
 	$(PYTHON) setup.py py2app
 
 .PHONY: zip
@@ -28,5 +43,4 @@ zip:
 
 .PHONY: clean
 clean:
-	rm -rf build dist
-
+	rm -rf .build build dist

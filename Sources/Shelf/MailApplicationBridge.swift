@@ -1,0 +1,196 @@
+import Foundation
+import ScriptingBridge
+
+struct MailSelectionSnapshot {
+    var sender: String
+    var senderEmail: String?
+    var recipients: [String]
+    var subject: String
+    var sentDate: Date?
+    var mailboxName: String
+    var accountName: String?
+    var bodyPreview: String
+}
+
+struct MailBridgeResult {
+    var output: String
+    var error: String?
+
+    var succeeded: Bool { error == nil }
+}
+
+final class MailApplicationBridge {
+    private let application: SBApplication?
+
+    init() {
+        application = SBApplication(bundleIdentifier: "com.apple.mail")
+    }
+
+    func selectedMessage() -> MailSelectionSnapshot? {
+        guard let message = selectedMessages().first else {
+            return nil
+        }
+
+        let sender = stringValue(message, key: "sender")
+        let subject = stringValue(message, key: "subject")
+        let body = stringValue(message, key: "content")
+        let date = dateValue(message, key: "dateReceived")
+            ?? dateValue(message, key: "dateSent")
+        let mailbox = objectValue(message, key: "mailbox")
+        let mailboxName = mailbox.flatMap { stringValue($0, key: "name") } ?? ""
+        let accountName = mailbox
+            .flatMap { objectValue($0, key: "account") }
+            .flatMap { stringValue($0, key: "name") }
+
+        return MailSelectionSnapshot(
+            sender: sender,
+            senderEmail: EmailAddress.first(in: sender),
+            recipients: recipientAddresses(from: message),
+            subject: subject,
+            sentDate: date,
+            mailboxName: mailboxName,
+            accountName: accountName?.isEmpty == false ? accountName : nil,
+            bodyPreview: compactPreview(body, limit: 4_000)
+        )
+    }
+
+    func moveSelectedMessages(to location: RankedMessageLocation) -> MailBridgeResult {
+        let messages = selectedMessages()
+        guard !messages.isEmpty else {
+            return MailBridgeResult(output: "", error: "No selected message.")
+        }
+        guard let mailbox = findMailbox(path: location.mailboxPath, accountHint: location.accountHint) else {
+            return MailBridgeResult(output: "", error: "Mailbox path not found: \(location.displayPath)")
+        }
+
+        let selector = NSSelectorFromString("moveTo:")
+        var moved = 0
+        for message in messages {
+            guard message.responds(to: selector) else {
+                return MailBridgeResult(output: "", error: "Mail message does not support moveTo:.")
+            }
+            _ = message.perform(selector, with: mailbox)
+            moved += 1
+        }
+
+        let error = messages
+            .compactMap { ($0 as? SBObject)?.lastError()?.localizedDescription }
+            .first
+        if let error {
+            return MailBridgeResult(output: "", error: error)
+        }
+        return MailBridgeResult(output: "Moved \(moved) message\(moved == 1 ? "" : "s") to \(location.displayPath).", error: nil)
+    }
+
+    private func selectedMessages() -> [NSObject] {
+        guard let selection = application?.value(forKey: "selection") else {
+            return []
+        }
+        if let array = selection as? [NSObject] {
+            return array
+        }
+        if let array = selection as? NSArray {
+            return array.compactMap { $0 as? NSObject }
+        }
+        return []
+    }
+
+    private func findMailbox(path: [String], accountHint: String?) -> NSObject? {
+        guard !path.isEmpty else {
+            return nil
+        }
+        let accountHint = appleScriptAccountHint(accountHint)
+        for account in objectCollection(application, key: "accounts") {
+            if let accountHint, !accountHint.isEmpty,
+               stringValue(account, key: "name") != accountHint {
+                continue
+            }
+            if let mailbox = findMailbox(path: path, in: objectCollection(account, key: "mailboxes")) {
+                return mailbox
+            }
+        }
+        return findMailbox(path: path, in: objectCollection(application, key: "mailboxes"))
+    }
+
+    private func findMailbox(path: [String], in mailboxes: [NSObject]) -> NSObject? {
+        guard let first = path.first else {
+            return nil
+        }
+        for mailbox in mailboxes {
+            guard stringValue(mailbox, key: "name") == first else {
+                continue
+            }
+            if path.count == 1 {
+                return mailbox
+            }
+            return findMailbox(path: Array(path.dropFirst()), in: objectCollection(mailbox, key: "mailboxes"))
+        }
+        return nil
+    }
+
+    private func recipientAddresses(from message: NSObject) -> [String] {
+        let recipientCollections = [
+            objectCollection(message, key: "toRecipients"),
+            objectCollection(message, key: "ccRecipients"),
+            objectCollection(message, key: "bccRecipients")
+        ]
+        let addresses = recipientCollections
+            .flatMap { $0 }
+            .compactMap { recipient -> String? in
+                let address = stringValue(recipient, key: "address")
+                return address.isEmpty ? nil : address
+            }
+        return Array(NSOrderedSet(array: addresses.map { $0.lowercased() })) as? [String] ?? addresses
+    }
+
+    private func objectCollection(_ object: NSObject?, key: String) -> [NSObject] {
+        guard let value = object?.value(forKey: key) else {
+            return []
+        }
+        if let array = value as? [NSObject] {
+            return array
+        }
+        if let array = value as? NSArray {
+            return array.compactMap { $0 as? NSObject }
+        }
+        return []
+    }
+
+    private func objectValue(_ object: NSObject, key: String) -> NSObject? {
+        object.value(forKey: key) as? NSObject
+    }
+
+    private func stringValue(_ object: NSObject, key: String) -> String {
+        if let value = object.value(forKey: key) as? String {
+            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return ""
+    }
+
+    private func dateValue(_ object: NSObject, key: String) -> Date? {
+        object.value(forKey: key) as? Date
+    }
+
+    private func compactPreview(_ value: String, limit: Int) -> String {
+        let normalized = value
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        return String(normalized.prefix(limit))
+    }
+
+    private func appleScriptAccountHint(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else {
+            return nil
+        }
+        if value.range(
+            of: #"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"#,
+            options: .regularExpression
+        ) != nil {
+            return nil
+        }
+        return value
+    }
+}
