@@ -2,7 +2,7 @@
 
 PYTHON ?= python
 
-VERSION = $(shell grep 'version =' setup.py | cut -d'"' -f 2)
+VERSION = $(shell grep 'version =' legacy/setup.py | cut -d'"' -f 2)
 
 .PHONY: all
 all: native-app
@@ -29,11 +29,11 @@ legacy-dev:
 	@echo -
 	@echo - dev build will not work under Snow Leopard unless you\'ve fixed your local build!!
 	@echo -
-	$(PYTHON) setup.py py2app -A
+	cd legacy && $(PYTHON) setup.py py2app -A
 
 .PHONY: legacy-dist
 legacy-dist:
-	$(PYTHON) setup.py py2app
+	cd legacy && $(PYTHON) setup.py py2app
 
 .PHONY: zip
 zip:
@@ -43,4 +43,4 @@ zip:
 
 .PHONY: clean
 clean:
-	rm -rf .build build dist
+	rm -rf .build build dist legacy/build legacy/dist

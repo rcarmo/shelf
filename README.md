@@ -25,4 +25,4 @@ For development:
 make native-run
 ```
 
-The legacy Python/PyObjC build is still available through `make legacy-dist`.
+The original Python/PyObjC source is preserved under `legacy/` for reference, and the legacy py2app build remains available through `make legacy-dist`.
