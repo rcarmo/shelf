@@ -145,8 +145,7 @@ final class ContextMonitor: ObservableObject {
             for: selectedContact,
             hint: currentHint,
             messageLocations: messageLocations,
-            mailContext: currentHint?.mailContext,
-            needsFullDiskAccess: mailNeedsFullDiskAccess
+            mailContext: currentHint?.mailContext
         )
     }
 
@@ -255,8 +254,7 @@ final class ContextMonitor: ObservableObject {
             for: selectedContact,
             hint: currentHint,
             messageLocations: suggestions.locations,
-            mailContext: mailContext,
-            needsFullDiskAccess: suggestions.requiresFullDiskAccess
+            mailContext: mailContext
         )
         statusText = suggestionStatusText(for: suggestions, isFinal: update.isFinal)
 

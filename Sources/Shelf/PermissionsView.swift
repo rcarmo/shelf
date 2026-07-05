@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct PermissionsView: View {
@@ -41,9 +42,61 @@ struct PermissionsView: View {
             ) {
                 monitor.requestAccessibilityAccess()
             }
+
+            FullDiskAccessControl(needsAccess: monitor.mailNeedsFullDiskAccess)
         }
         .onChange(of: contentBaseFontSize) { newValue in
             contentBaseFontSize = ShelfSettings.clampedContentBaseFontSize(newValue)
+        }
+    }
+}
+
+private struct FullDiskAccessControl: View {
+    var needsAccess: Bool
+
+    private var statusText: String {
+        needsAccess ? "Enable in Settings" : "No issue detected"
+    }
+
+    private var statusColor: Color {
+        needsAccess ? .orange : .green
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Full Disk Access", systemImage: "externaldrive.badge.person.crop")
+                    .font(.headline)
+                Spacer()
+                Text(statusText)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(statusColor)
+            }
+            Text("Needed for local Mail header reads when Mail messages are not available through Spotlight.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Button(action: openFullDiskAccessSettings) {
+                Label("Open Full Disk Access Settings", systemImage: "lock.open")
+            }
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func openFullDiskAccessSettings() {
+        let candidates = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
+        ]
+
+        for candidate in candidates {
+            guard let url = URL(string: candidate) else {
+                continue
+            }
+            if NSWorkspace.shared.open(url) {
+                return
+            }
         }
     }
 }

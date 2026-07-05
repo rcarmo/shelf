@@ -10,16 +10,12 @@ final class AutomationRunner {
         for contact: ContactClue?,
         hint: AppHint?,
         messageLocations: [RankedMessageLocation] = [],
-        mailContext: MailMessageContext? = nil,
-        needsFullDiskAccess: Bool = false
+        mailContext: MailMessageContext? = nil
     ) -> [AppAutomationAction] {
         var actions: [AppAutomationAction] = []
 
         if let hint, hint.bundleIdentifier == "com.apple.mail" {
             actions.append(contentsOf: messageLocations.map { moveSelectedMailAction(to: $0, mailContext: mailContext) })
-            if needsFullDiskAccess {
-                actions.append(openFullDiskAccessSettingsAction())
-            }
         }
 
         if let contact {
@@ -57,38 +53,6 @@ final class AutomationRunner {
 
     var accessibilityPermissionState: PermissionState {
         AXIsProcessTrusted() ? .allowed : .notDetermined
-    }
-
-    private func openFullDiskAccessSettingsAction() -> AppAutomationAction {
-        AppAutomationAction(
-            title: "Open Full Disk Access Settings",
-            detail: "Open System Settings so Shelf can be enabled for local Mail header reads.",
-            systemImage: "externaldrive.badge.person.crop"
-        ) {
-            let candidates = [
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
-                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
-            ]
-
-            for candidate in candidates {
-                guard let url = URL(string: candidate) else {
-                    continue
-                }
-                if NSWorkspace.shared.open(url) {
-                    return AutomationResult(
-                        title: "Opened Settings",
-                        message: "Enable Shelf in Full Disk Access, then relaunch Shelf.",
-                        isError: false
-                    )
-                }
-            }
-
-            return AutomationResult(
-                title: "Could Not Open Settings",
-                message: "Open System Settings > Privacy & Security > Full Disk Access and enable Shelf.",
-                isError: true
-            )
-        }
     }
 
     private func openContactAction(_ contact: ContactClue) -> AppAutomationAction {
