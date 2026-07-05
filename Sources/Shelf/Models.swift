@@ -227,12 +227,12 @@ struct SubjectTokenizer {
         "about", "into", "onto", "over", "under"
     ]
 
-    static func terms(from subject: String) -> [String] {
+    static func terms(from subject: String, limit: Int = 6) -> [String] {
         let filtered = subject
             .lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { $0.count > 2 && !stopWords.contains($0) }
-        return Array(filtered.prefix(6))
+        return Array(filtered.prefix(limit))
     }
 }
 

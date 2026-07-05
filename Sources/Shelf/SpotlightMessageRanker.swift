@@ -73,13 +73,15 @@ final class SpotlightMessageRanker {
         )
 
         var merged: [MessageCandidate] = []
-        var seenPaths = Set<String>()
+        var indexByPath: [String: Int] = [:]
         for candidate in mailHeaderCandidates.candidates + senderMetadataCandidates + semanticMetadataCandidates {
-            guard seenPaths.insert(candidate.path).inserted else {
+            if let existingIndex = indexByPath[candidate.path] {
+                merged[existingIndex] = mergedCandidate(merged[existingIndex], candidate)
                 continue
             }
             var ranked = candidate
             ranked.rank = merged.count + 1
+            indexByPath[ranked.path] = merged.count
             merged.append(ranked)
             if merged.count >= maximumResults * 2 {
                 break
@@ -105,6 +107,28 @@ final class SpotlightMessageRanker {
             spotlightCache[cacheKey] = (Date(), merged, diagnostic)
         }
         return (merged, diagnostic, mailHeaderCandidates.requiresFullDiskAccess)
+    }
+
+    private func mergedCandidate(_ existing: MessageCandidate, _ incoming: MessageCandidate) -> MessageCandidate {
+        var merged = existing
+        if incoming.bodyPreview.count > existing.bodyPreview.count {
+            merged.bodyPreview = incoming.bodyPreview
+        }
+        if merged.header.subject == nil {
+            merged.header.subject = incoming.header.subject
+        }
+        if merged.header.sender == nil {
+            merged.header.sender = incoming.header.sender
+        }
+        if merged.header.date == nil {
+            merged.header.date = incoming.header.date
+        }
+        merged.supportsMailFiling = existing.supportsMailFiling || incoming.supportsMailFiling
+        merged.contributesSimilarMessage = existing.contributesSimilarMessage || incoming.contributesSimilarMessage
+        if merged.mailboxInfo.mailboxPath == ["Mail"], incoming.mailboxInfo.mailboxPath != ["Mail"] {
+            merged.mailboxInfo = incoming.mailboxInfo
+        }
+        return merged
     }
 
     private func learnedMoveCandidates(for context: MailMessageContext, limit: Int) async -> [MessageCandidate] {
@@ -256,19 +280,25 @@ final class SpotlightMessageRanker {
 
     private func similarMessages(from candidates: [MessageCandidate], context: MailMessageContext) -> [SimilarMessage] {
         var seen = Set<String>()
-        return candidates.compactMap { candidate -> (candidate: MessageCandidate, score: Double)? in
+        let scored = candidates.compactMap { candidate -> (candidate: MessageCandidate, score: Double, strict: Bool)? in
             guard candidate.contributesSimilarMessage,
                   !isExcludedMailbox(candidate.mailboxInfo.mailboxPath),
                   seen.insert(dedupeKey(for: candidate)).inserted else {
                 return nil
             }
             let score = relatedMessageScore(candidate, context: context)
-            guard score >= relatedMessageMinimumScore(candidate, context: context) else {
+            let strict = score >= relatedMessageMinimumScore(candidate, context: context)
+            guard strict || relaxedRelatedMessageFallback(candidate, context: context, score: score) else {
                 return nil
             }
 
-            return (candidate, score)
+            return (candidate, score, strict)
         }
+
+        let strictMatches = scored.filter(\.strict)
+        let displayMatches = strictMatches.isEmpty ? scored : strictMatches
+
+        return displayMatches
         .sorted { lhs, rhs in
             if lhs.score == rhs.score {
                 return (lhs.candidate.header.date ?? .distantPast) > (rhs.candidate.header.date ?? .distantPast)
@@ -302,17 +332,17 @@ final class SpotlightMessageRanker {
         .joined(separator: "\n")
         .lowercased()
 
-        let contextSubjectTerms = Set(SubjectTokenizer.terms(from: context.subject))
-        let candidateSubjectTerms = Set(SubjectTokenizer.terms(from: candidate.header.subject ?? ""))
+        let contextSubjectTerms = Set(SubjectTokenizer.terms(from: context.subject, limit: 10))
+        let candidateSubjectTerms = Set(SubjectTokenizer.terms(from: candidate.header.subject ?? "", limit: 10))
         let subjectIntersection = contextSubjectTerms.intersection(candidateSubjectTerms)
         let subjectUnion = contextSubjectTerms.union(candidateSubjectTerms)
 
-        let contextBodyTerms = Set(SubjectTokenizer.terms(from: context.bodyPreview))
-        let candidateBodyTerms = Set(SubjectTokenizer.terms(from: candidate.bodyPreview))
+        let contextBodyTerms = Set(SubjectTokenizer.terms(from: context.bodyPreview, limit: 24))
+        let candidateBodyTerms = Set(SubjectTokenizer.terms(from: candidate.bodyPreview, limit: 24))
         let bodyIntersection = contextBodyTerms.intersection(candidateBodyTerms)
         let bodyUnion = contextBodyTerms.union(candidateBodyTerms)
 
-        let mailboxTerms = Set(SubjectTokenizer.terms(from: candidate.mailboxInfo.mailboxPath.joined(separator: " ")))
+        let mailboxTerms = Set(SubjectTokenizer.terms(from: candidate.mailboxInfo.mailboxPath.joined(separator: " "), limit: 8))
         let contextTerms = Set(context.searchTerms.filter { $0.count >= 4 && !$0.contains("@") && !$0.contains(".") })
         let mailboxIntersection = mailboxTerms.intersection(contextTerms)
 
@@ -360,6 +390,24 @@ final class SpotlightMessageRanker {
         return sameSender ? 22 : 30
     }
 
+    private func relaxedRelatedMessageFallback(_ candidate: MessageCandidate, context: MailMessageContext, score: Double) -> Bool {
+        let contextSender = normalizedSender(context.senderEmail ?? context.sender)
+        let candidateSender = normalizedSender(candidate.header.sender ?? "")
+        guard !contextSender.isEmpty else {
+            return false
+        }
+
+        if candidateSender == contextSender {
+            return score >= 18
+        }
+
+        guard let contextDomain = contextSender.split(separator: "@").last,
+              let candidateDomain = candidateSender.split(separator: "@").last else {
+            return false
+        }
+        return contextDomain == candidateDomain && score >= 20
+    }
+
     private func hasRelatedTextSignal(_ candidate: MessageCandidate, context: MailMessageContext) -> Bool {
         let contextSubject = normalizedSubject(context.subject)
         let candidateSubject = normalizedSubject(candidate.header.subject ?? "")
@@ -367,19 +415,19 @@ final class SpotlightMessageRanker {
             return true
         }
 
-        let subjectOverlap = Set(SubjectTokenizer.terms(from: context.subject))
-            .intersection(Set(SubjectTokenizer.terms(from: candidate.header.subject ?? "")))
+        let subjectOverlap = Set(SubjectTokenizer.terms(from: context.subject, limit: 10))
+            .intersection(Set(SubjectTokenizer.terms(from: candidate.header.subject ?? "", limit: 10)))
         if !subjectOverlap.isEmpty {
             return true
         }
 
-        let bodyOverlap = Set(SubjectTokenizer.terms(from: context.bodyPreview))
-            .intersection(Set(SubjectTokenizer.terms(from: candidate.bodyPreview)))
+        let bodyOverlap = Set(SubjectTokenizer.terms(from: context.bodyPreview, limit: 24))
+            .intersection(Set(SubjectTokenizer.terms(from: candidate.bodyPreview, limit: 24)))
         if bodyOverlap.count >= 2 {
             return true
         }
 
-        let mailboxOverlap = Set(SubjectTokenizer.terms(from: candidate.mailboxInfo.mailboxPath.joined(separator: " ")))
+        let mailboxOverlap = Set(SubjectTokenizer.terms(from: candidate.mailboxInfo.mailboxPath.joined(separator: " "), limit: 8))
             .intersection(Set(context.searchTerms.filter { $0.count >= 4 && !$0.contains("@") && !$0.contains(".") }))
         return !mailboxOverlap.isEmpty
     }
