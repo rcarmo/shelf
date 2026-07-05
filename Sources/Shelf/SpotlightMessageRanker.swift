@@ -4,11 +4,9 @@ import LatentSemanticMapping
 final class SpotlightMessageRanker {
     private let maximumResults = 80
     private let maximumTrainingMessagesPerMailbox = 8
-    private let spotlightCacheLifetime: TimeInterval = 180
     private let excludedMailboxNames: Set<String> = [
         "deleted items", "deleted messages", "trash", "bin", "junk", "junk email", "spam"
     ]
-    private var spotlightCache: [String: (createdAt: Date, candidates: [MessageCandidate], diagnostic: String)] = [:]
 
     func quickSimilarMessages(for context: MailMessageContext) async -> [SimilarMessage] {
         let senderNeedle = normalizedSender(context.senderEmail ?? context.sender)
@@ -25,93 +23,190 @@ final class SpotlightMessageRanker {
     }
 
     func suggestions(for context: MailMessageContext) async -> MailSuggestions {
-        let senderNeedle = normalizedSender(context.senderEmail ?? context.sender)
-        guard !senderNeedle.isEmpty else {
-            return .empty
+        var finalSuggestions = MailSuggestions.empty
+        for await update in suggestionUpdates(for: context) {
+            finalSuggestions = update.suggestions
         }
-        let terms = context.searchTerms.filter { !$0.isEmpty }
-
-        let result = await spotlightCandidates(for: context, terms: terms)
-        let learnedCandidates = await learnedMoveCandidates(for: context, limit: 8)
-        let candidates = rankedCandidates(learnedCandidates + result.candidates)
-
-        guard !candidates.isEmpty else {
-            return MailSuggestions(
-                locations: [],
-                messages: [],
-                diagnostic: result.diagnostic,
-                requiresFullDiskAccess: result.requiresFullDiskAccess
-            )
-        }
-
-        let locations = groupedLocations(from: candidates, currentMailbox: context.currentMailbox, context: context)
-        let messages = similarMessages(from: candidates, context: context)
-        return MailSuggestions(
-            locations: locations,
-            messages: messages,
-            diagnostic: "\(result.diagnostic) Learned LSM ranked \(learnedCandidates.count) destination\(learnedCandidates.count == 1 ? "" : "s"). LSM ranked \(locations.count) filing destination\(locations.count == 1 ? "" : "s").",
-            requiresFullDiskAccess: result.requiresFullDiskAccess
-        )
+        return finalSuggestions
     }
 
-    private func spotlightCandidates(for context: MailMessageContext, terms: [String]) async -> (candidates: [MessageCandidate], diagnostic: String, requiresFullDiskAccess: Bool) {
-        let needle = normalizedSender(context.senderEmail ?? context.sender)
-        let cacheKey = ([needle] + terms.map { $0.lowercased() }.sorted()).joined(separator: "|")
-        if let cached = spotlightCache[cacheKey],
-           !cached.candidates.isEmpty,
-           Date().timeIntervalSince(cached.createdAt) < spotlightCacheLifetime {
-            return (cached.candidates, "\(cached.diagnostic) Cached.", false)
-        }
+    func suggestionUpdates(for context: MailMessageContext) -> AsyncStream<MailSuggestionUpdate> {
+        AsyncStream { continuation in
+            let task = Task { [weak self] in
+                guard let self else {
+                    continuation.finish()
+                    return
+                }
 
-        async let semanticMetadataSearch = SpotlightMailQuery.search(context: context, terms: terms, limit: maximumResults, mode: .semantic)
-        async let globalHeaderSearch = MailHeaderCache.shared.globalCandidates(for: context, terms: terms, limit: maximumResults)
-        async let senderMetadataSearch = SpotlightMailQuery.search(context: context, terms: terms, limit: maximumResults, mode: .sender)
-        async let senderHeaderSearch = MailHeaderCache.shared.candidates(for: context, terms: terms, limit: maximumResults)
-        let (semanticMetadataCandidates, globalHeaderCandidates, senderMetadataCandidates, senderHeaderCandidates) = await (
-            semanticMetadataSearch,
-            globalHeaderSearch,
-            senderMetadataSearch,
-            senderHeaderSearch
-        )
+                let senderNeedle = normalizedSender(context.senderEmail ?? context.sender)
+                guard !senderNeedle.isEmpty else {
+                    continuation.yield(MailSuggestionUpdate(suggestions: .empty, isFinal: true))
+                    continuation.finish()
+                    return
+                }
 
-        var merged: [MessageCandidate] = []
-        var indexByPath: [String: Int] = [:]
-        for candidate in semanticMetadataCandidates + globalHeaderCandidates + senderMetadataCandidates + senderHeaderCandidates.candidates {
-            if let existingIndex = indexByPath[candidate.path] {
-                merged[existingIndex] = mergedCandidate(merged[existingIndex], candidate)
-                continue
+                let terms = context.searchTerms.filter { !$0.isEmpty }
+                var merged: [MessageCandidate] = []
+                var indexByPath: [String: Int] = [:]
+                var diagnosticsBySource: [SpotlightCandidateChunk.Source: String] = [:]
+                var requiresFullDiskAccess = false
+
+                for await chunk in candidateChunks(for: context, terms: terms) {
+                    guard !Task.isCancelled else {
+                        break
+                    }
+
+                    if let diagnostic = chunk.diagnostic, !diagnostic.isEmpty {
+                        diagnosticsBySource[chunk.source] = diagnostic
+                    }
+                    requiresFullDiskAccess = requiresFullDiskAccess || chunk.requiresFullDiskAccess
+
+                    for candidate in chunk.candidates {
+                        if let existingIndex = indexByPath[candidate.path] {
+                            merged[existingIndex] = mergedCandidate(merged[existingIndex], candidate)
+                            continue
+                        }
+                        var ranked = candidate
+                        ranked.rank = merged.count + 1
+                        indexByPath[ranked.path] = merged.count
+                        merged.append(ranked)
+                        if merged.count >= maximumResults * 4 {
+                            break
+                        }
+                    }
+
+                    let suggestions = await mailSuggestions(
+                        from: merged,
+                        context: context,
+                        diagnostic: streamingDiagnostic(from: diagnosticsBySource),
+                        requiresFullDiskAccess: requiresFullDiskAccess
+                    )
+                    continuation.yield(MailSuggestionUpdate(suggestions: suggestions, isFinal: false))
+                }
+
+                guard !Task.isCancelled else {
+                    continuation.finish()
+                    return
+                }
+
+                let finalSuggestions = await mailSuggestions(
+                    from: merged,
+                    context: context,
+                    diagnostic: streamingDiagnostic(from: diagnosticsBySource),
+                    requiresFullDiskAccess: requiresFullDiskAccess
+                )
+                if !finalSuggestions.messages.isEmpty || !finalSuggestions.locations.isEmpty || !finalSuggestions.diagnostic.isEmpty {
+                    continuation.yield(MailSuggestionUpdate(suggestions: finalSuggestions, isFinal: true))
+                } else {
+                    continuation.yield(MailSuggestionUpdate(suggestions: .empty, isFinal: true))
+                }
+                continuation.finish()
             }
-            var ranked = candidate
-            ranked.rank = merged.count + 1
-            indexByPath[ranked.path] = merged.count
-            merged.append(ranked)
-            if merged.count >= maximumResults * 4 {
-                break
+
+            continuation.onTermination = { _ in
+                task.cancel()
             }
         }
+    }
 
-        let diagnostics = [
-            semanticMetadataCandidates.isEmpty
-                ? nil
-                : "Spotlight semantic returned \(semanticMetadataCandidates.count) email candidate\(semanticMetadataCandidates.count == 1 ? "" : "s").",
-            globalHeaderCandidates.isEmpty
-                ? nil
-                : "Global header search returned \(globalHeaderCandidates.count) topic candidate\(globalHeaderCandidates.count == 1 ? "" : "s").",
-            senderMetadataCandidates.isEmpty
-                ? nil
-                : "Spotlight sender returned \(senderMetadataCandidates.count) email candidate\(senderMetadataCandidates.count == 1 ? "" : "s").",
-            senderHeaderCandidates.diagnostic
+    private func mailSuggestions(
+        from candidates: [MessageCandidate],
+        context: MailMessageContext,
+        diagnostic: String,
+        requiresFullDiskAccess: Bool
+    ) async -> MailSuggestions {
+        await Task.detached(priority: .userInitiated) { [self] in
+            let ranked = rankedCandidates(candidates)
+            guard !ranked.isEmpty else {
+                return MailSuggestions(
+                    locations: [],
+                    messages: [],
+                    diagnostic: diagnostic,
+                    requiresFullDiskAccess: requiresFullDiskAccess
+                )
+            }
+
+            let locations = groupedLocations(from: ranked, currentMailbox: context.currentMailbox, context: context)
+            let messages = similarMessages(from: ranked, context: context)
+            let lsmDiagnostic = "LSM ranked \(locations.count) filing destination\(locations.count == 1 ? "" : "s")."
+            return MailSuggestions(
+                locations: locations,
+                messages: messages,
+                diagnostic: [diagnostic, lsmDiagnostic].filter { !$0.isEmpty }.joined(separator: " "),
+                requiresFullDiskAccess: requiresFullDiskAccess
+            )
+        }.value
+    }
+
+    private func candidateChunks(for context: MailMessageContext, terms: [String]) -> AsyncStream<SpotlightCandidateChunk> {
+        AsyncStream { continuation in
+            let semanticTask = Task {
+                for await candidates in SpotlightMailQuery.stream(context: context, terms: terms, limit: maximumResults, mode: .semantic) {
+                    let diagnostic = candidates.isEmpty
+                        ? nil
+                        : "Spotlight semantic returned \(candidates.count) email candidate\(candidates.count == 1 ? "" : "s")."
+                    continuation.yield(SpotlightCandidateChunk(source: .semanticSpotlight, candidates: candidates, diagnostic: diagnostic))
+                }
+            }
+            let senderTask = Task {
+                for await candidates in SpotlightMailQuery.stream(context: context, terms: terms, limit: maximumResults, mode: .sender) {
+                    let diagnostic = candidates.isEmpty
+                        ? nil
+                        : "Spotlight sender returned \(candidates.count) email candidate\(candidates.count == 1 ? "" : "s")."
+                    continuation.yield(SpotlightCandidateChunk(source: .senderSpotlight, candidates: candidates, diagnostic: diagnostic))
+                }
+            }
+            let globalHeaderTask = Task {
+                let candidates = await MailHeaderCache.shared.globalCandidates(for: context, terms: terms, limit: maximumResults)
+                let diagnostic = candidates.isEmpty
+                    ? nil
+                    : "Global header search returned \(candidates.count) topic candidate\(candidates.count == 1 ? "" : "s")."
+                continuation.yield(SpotlightCandidateChunk(source: .globalHeader, candidates: candidates, diagnostic: diagnostic))
+            }
+            let senderHeaderTask = Task {
+                let result = await MailHeaderCache.shared.candidates(for: context, terms: terms, limit: maximumResults)
+                continuation.yield(SpotlightCandidateChunk(
+                    source: .senderHeader,
+                    candidates: result.candidates,
+                    diagnostic: result.diagnostic,
+                    requiresFullDiskAccess: result.requiresFullDiskAccess
+                ))
+            }
+            let learnedTask = Task {
+                let candidates = await learnedMoveCandidates(for: context, limit: 8)
+                let diagnostic = "Learned LSM ranked \(candidates.count) destination\(candidates.count == 1 ? "" : "s")."
+                continuation.yield(SpotlightCandidateChunk(source: .learnedMoves, candidates: candidates, diagnostic: diagnostic))
+            }
+            let finishTask = Task {
+                _ = await semanticTask.result
+                _ = await senderTask.result
+                _ = await globalHeaderTask.result
+                _ = await senderHeaderTask.result
+                _ = await learnedTask.result
+                continuation.finish()
+            }
+
+            continuation.onTermination = { _ in
+                semanticTask.cancel()
+                senderTask.cancel()
+                globalHeaderTask.cancel()
+                senderHeaderTask.cancel()
+                learnedTask.cancel()
+                finishTask.cancel()
+            }
+        }
+    }
+
+    private func streamingDiagnostic(from diagnosticsBySource: [SpotlightCandidateChunk.Source: String]) -> String {
+        [
+            diagnosticsBySource[.semanticSpotlight],
+            diagnosticsBySource[.globalHeader],
+            diagnosticsBySource[.senderSpotlight],
+            diagnosticsBySource[.senderHeader],
+            diagnosticsBySource[.learnedMoves]
         ]
         .compactMap { $0 }
-
-        let diagnostic = diagnostics.isEmpty
-            ? "Spotlight returned no Mail metadata candidates for \(needle)."
-            : diagnostics.joined(separator: " ")
-
-        if !merged.isEmpty {
-            spotlightCache[cacheKey] = (Date(), merged, diagnostic)
-        }
-        return (merged, diagnostic, senderHeaderCandidates.requiresFullDiskAccess)
+        .joined(separator: " ")
     }
 
     private func mergedCandidate(_ existing: MessageCandidate, _ incoming: MessageCandidate) -> MessageCandidate {
@@ -661,6 +756,21 @@ private struct MessageCandidate {
     }
 }
 
+private struct SpotlightCandidateChunk {
+    enum Source: Hashable {
+        case semanticSpotlight
+        case globalHeader
+        case senderSpotlight
+        case senderHeader
+        case learnedMoves
+    }
+
+    var source: Source
+    var candidates: [MessageCandidate]
+    var diagnostic: String?
+    var requiresFullDiskAccess = false
+}
+
 private enum MIMEHeaderDecoder {
     private static let encodedWordPattern = #"=\?([^?]+)\?([bBqQ])\?([^?]*)\?="#
 
@@ -826,11 +936,21 @@ private final class SpotlightMailQuery: NSObject {
     private let terms: [String]
     private let limit: Int
     private let mode: SearchMode
-    private let continuation: CheckedContinuation<[MessageCandidate], Never>
+    private let continuation: CheckedContinuation<[MessageCandidate], Never>?
+    private let streamContinuation: AsyncStream<[MessageCandidate]>.Continuation?
     private var query: NSMetadataQuery?
     private var delayedFinish: DispatchWorkItem?
     private var timeoutFinish: DispatchWorkItem?
     private var didResume = false
+    private var lastChunkSignature = ""
+
+    private var settleDelay: TimeInterval {
+        mode == .semantic ? 0.75 : 0.15
+    }
+
+    private var timeoutDelay: TimeInterval {
+        mode == .semantic ? 3.0 : 0.85
+    }
 
     static func search(context: MailMessageContext, terms: [String], limit: Int, mode: SearchMode) async -> [MessageCandidate] {
         await withCheckedContinuation { continuation in
@@ -841,6 +961,22 @@ private final class SpotlightMailQuery: NSObject {
                     limit: limit,
                     mode: mode,
                     continuation: continuation
+                )
+                active[runner.id] = runner
+                runner.start()
+            }
+        }
+    }
+
+    static func stream(context: MailMessageContext, terms: [String], limit: Int, mode: SearchMode) -> AsyncStream<[MessageCandidate]> {
+        AsyncStream { continuation in
+            DispatchQueue.main.async {
+                let runner = SpotlightMailQuery(
+                    context: context,
+                    terms: terms,
+                    limit: limit,
+                    mode: mode,
+                    streamContinuation: continuation
                 )
                 active[runner.id] = runner
                 runner.start()
@@ -860,6 +996,23 @@ private final class SpotlightMailQuery: NSObject {
         self.limit = limit
         self.mode = mode
         self.continuation = continuation
+        self.streamContinuation = nil
+        super.init()
+    }
+
+    private init(
+        context: MailMessageContext,
+        terms: [String],
+        limit: Int,
+        mode: SearchMode,
+        streamContinuation: AsyncStream<[MessageCandidate]>.Continuation
+    ) {
+        self.context = context
+        self.terms = terms
+        self.limit = limit
+        self.mode = mode
+        self.continuation = nil
+        self.streamContinuation = streamContinuation
         super.init()
     }
 
@@ -895,7 +1048,7 @@ private final class SpotlightMailQuery: NSObject {
             self?.finish()
         }
         self.timeoutFinish = timeoutFinish
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.85, execute: timeoutFinish)
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeoutDelay, execute: timeoutFinish)
     }
 
     @objc private func queryDidUpdate(_ notification: Notification) {
@@ -904,6 +1057,7 @@ private final class SpotlightMailQuery: NSObject {
               query.resultCount > 0 else {
             return
         }
+        yieldCurrentCandidates()
         scheduleResultFinish()
     }
 
@@ -920,7 +1074,7 @@ private final class SpotlightMailQuery: NSObject {
             self?.finish()
         }
         delayedFinish = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay, execute: workItem)
     }
 
     private func finish() {
@@ -946,13 +1100,45 @@ private final class SpotlightMailQuery: NSObject {
 
         didResume = true
         NotificationCenter.default.removeObserver(self)
-        continuation.resume(returning: candidates)
+        if let continuation {
+            continuation.resume(returning: candidates)
+        }
+        if let streamContinuation {
+            yield(candidates)
+            streamContinuation.finish()
+        }
         Self.active[id] = nil
+    }
+
+    private func yieldCurrentCandidates() {
+        guard let query, streamContinuation != nil else {
+            return
+        }
+
+        query.disableUpdates()
+        let candidates = candidates(from: query)
+        query.enableUpdates()
+        yield(candidates)
+    }
+
+    private func yield(_ candidates: [MessageCandidate]) {
+        guard let streamContinuation, !candidates.isEmpty else {
+            return
+        }
+
+        let signature = candidates.map(\.path).joined(separator: "\u{1F}")
+        guard signature != lastChunkSignature else {
+            return
+        }
+        lastChunkSignature = signature
+        streamContinuation.yield(candidates)
     }
 
     private func candidates(from query: NSMetadataQuery) -> [MessageCandidate] {
         var seenPaths = Set<String>()
-        let inspectedLimit = min(max(limit * 2, 80), 160)
+        let inspectedLimit = mode == .semantic
+            ? min(max(limit * 30, 1_200), 3_000)
+            : min(max(limit * 2, 80), 160)
         return Array(query.results.prefix(inspectedLimit))
             .enumerated()
             .compactMap { index, item -> MessageCandidate? in

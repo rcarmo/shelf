@@ -220,43 +220,67 @@ final class ContextMonitor: ObservableObject {
                 }
             }
 
-            let suggestions = await messageRanker.suggestions(for: mailContext)
-            guard !Task.isCancelled else {
-                return
-            }
-            await MainActor.run {
-                guard self.currentHint?.signature == signature else {
+            for await update in messageRanker.suggestionUpdates(for: mailContext) {
+                guard !Task.isCancelled else {
                     return
                 }
-                self.messageLocations = suggestions.locations
-                self.similarMessages = suggestions.messages
-                self.mailSuggestionStatus = suggestions.diagnostic
-                self.mailNeedsFullDiskAccess = suggestions.requiresFullDiskAccess
-                self.isSearchingMessages = false
-                self.cacheSuggestions(suggestions, for: hint)
-                self.actions = self.automation.actions(
-                    for: self.selectedContact,
-                    hint: self.currentHint,
-                    messageLocations: suggestions.locations,
-                    mailContext: mailContext,
-                    needsFullDiskAccess: suggestions.requiresFullDiskAccess
-                )
-                if suggestions.messages.isEmpty && suggestions.locations.isEmpty {
-                    self.statusText = "No similar messages"
-                } else if suggestions.locations.isEmpty {
-                    self.statusText = "\(suggestions.messages.count) similar message\(suggestions.messages.count == 1 ? "" : "s")"
-                } else if suggestions.messages.isEmpty {
-                    self.statusText = "\(suggestions.locations.count) move suggestion\(suggestions.locations.count == 1 ? "" : "s")"
-                } else {
-                    self.statusText = "\(suggestions.messages.count) similar message\(suggestions.messages.count == 1 ? "" : "s"), \(suggestions.locations.count) move suggestion\(suggestions.locations.count == 1 ? "" : "s")"
+                await MainActor.run {
+                    guard self.currentHint?.signature == signature else {
+                        return
+                    }
+                    self.applySuggestionUpdate(update, hint: hint, mailContext: mailContext, signature: signature)
                 }
-                self.summarizeSimilarMessagesIfNeeded(
-                    suggestions.messages,
-                    mailContext: mailContext,
-                    signature: signature
-                )
             }
         }
+    }
+
+    private func applySuggestionUpdate(
+        _ update: MailSuggestionUpdate,
+        hint: AppHint,
+        mailContext: MailMessageContext,
+        signature: String
+    ) {
+        let suggestions = update.suggestions
+        messageLocations = suggestions.locations
+        if !suggestions.messages.isEmpty || update.isFinal {
+            similarMessages = suggestions.messages
+        }
+        mailSuggestionStatus = suggestions.diagnostic
+        mailNeedsFullDiskAccess = suggestions.requiresFullDiskAccess
+        isSearchingMessages = !update.isFinal
+        if update.isFinal {
+            cacheSuggestions(suggestions, for: hint)
+        }
+        actions = automation.actions(
+            for: selectedContact,
+            hint: currentHint,
+            messageLocations: suggestions.locations,
+            mailContext: mailContext,
+            needsFullDiskAccess: suggestions.requiresFullDiskAccess
+        )
+        statusText = suggestionStatusText(for: suggestions, isFinal: update.isFinal)
+
+        if update.isFinal {
+            summarizeSimilarMessagesIfNeeded(
+                suggestions.messages,
+                mailContext: mailContext,
+                signature: signature
+            )
+        }
+    }
+
+    private func suggestionStatusText(for suggestions: MailSuggestions, isFinal: Bool) -> String {
+        if suggestions.messages.isEmpty && suggestions.locations.isEmpty {
+            return isFinal ? "No similar messages" : "Searching similar messages"
+        }
+        let suffix = isFinal ? "" : " so far"
+        if suggestions.locations.isEmpty {
+            return "\(suggestions.messages.count) similar message\(suggestions.messages.count == 1 ? "" : "s")\(suffix)"
+        }
+        if suggestions.messages.isEmpty {
+            return "\(suggestions.locations.count) move suggestion\(suggestions.locations.count == 1 ? "" : "s")\(suffix)"
+        }
+        return "\(suggestions.messages.count) similar message\(suggestions.messages.count == 1 ? "" : "s"), \(suggestions.locations.count) move suggestion\(suggestions.locations.count == 1 ? "" : "s")\(suffix)"
     }
 
     private func restoreCachedSuggestions(for hint: AppHint) {

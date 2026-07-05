@@ -161,6 +161,11 @@ struct MailSuggestions: Equatable {
     static let empty = MailSuggestions(locations: [], messages: [], diagnostic: "", requiresFullDiskAccess: false)
 }
 
+struct MailSuggestionUpdate: Equatable {
+    var suggestions: MailSuggestions
+    var isFinal: Bool
+}
+
 struct AutomationResult: Identifiable {
     let id = UUID()
     var title: String
