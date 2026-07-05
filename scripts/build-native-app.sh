@@ -47,7 +47,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundleVersion</key>
   <string>$VERSION</string>
   <key>LSMinimumSystemVersion</key>
-  <string>13.0</string>
+  <string>26.0</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>Shelf uses Apple Events to read context from and automate supported apps such as Safari, Chrome, Mail, Finder, and Contacts.</string>
   <key>NSContactsUsageDescription</key>
@@ -72,7 +72,16 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 PLIST
 
 if command -v codesign >/dev/null 2>&1; then
-    codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || true
+    SIGN_IDENTITY="${SHELF_CODESIGN_IDENTITY:-}"
+    if [[ -z "$SIGN_IDENTITY" ]] && command -v security >/dev/null 2>&1; then
+        SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/"/ { print $2; exit }')"
+    fi
+
+    if [[ -n "$SIGN_IDENTITY" ]]; then
+        codesign --force --sign "$SIGN_IDENTITY" "$APP_DIR" >/dev/null 2>&1 || true
+    else
+        codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || true
+    fi
 fi
 
 echo "$APP_DIR"
