@@ -1573,7 +1573,7 @@ private actor MailHeaderCache {
     private let cacheVersion = 2
     private let headerReadLimit = 32 * 1024
     private let foregroundScanBudget: TimeInterval = 1.2
-    private let foregroundThreadScanBudget: TimeInterval = 10
+    private let foregroundThreadScanBudget: TimeInterval = 1.5
     private let foregroundMailboxBudget: TimeInterval = 0.45
     private let backgroundWarmInterval: TimeInterval = 15 * 60
     private let maximumStoredRecords = 120_000
@@ -1688,7 +1688,7 @@ private actor MailHeaderCache {
         }
 
         let cached = rankedThreadCandidates(for: context, normalizedThreadSubject: threadSubject, limit: limit)
-        if cached.count >= min(2, limit) {
+        if !cached.isEmpty {
             startBackgroundWarmIfNeeded()
             return (cached, "Mail header thread search returned \(cached.count) local thread candidate\(cached.count == 1 ? "" : "s").", false)
         }
