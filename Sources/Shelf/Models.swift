@@ -166,6 +166,7 @@ struct AutomationResult: Identifiable {
     var title: String
     var message: String
     var isError: Bool
+    var shouldAutoClear = true
 }
 
 struct AppAutomationAction: Identifiable {
