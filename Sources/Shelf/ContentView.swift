@@ -1,7 +1,44 @@
 import SwiftUI
 
+private struct ContentBaseFontSizeKey: EnvironmentKey {
+    static let defaultValue = ShelfSettings.defaultContentBaseFontSize
+}
+
+private extension EnvironmentValues {
+    var contentBaseFontSize: Double {
+        get { self[ContentBaseFontSizeKey.self] }
+        set { self[ContentBaseFontSizeKey.self] = newValue }
+    }
+}
+
+private struct ContentFontScale {
+    var baseSize: Double
+
+    private func size(_ offset: Double = 0) -> CGFloat {
+        CGFloat(ShelfSettings.clampedContentBaseFontSize(baseSize + offset))
+    }
+
+    var headline: Font { .system(size: size(1), weight: .semibold) }
+    var subheadline: Font { .system(size: size()) }
+    var subheadlineSemibold: Font { .system(size: size(), weight: .semibold) }
+    var caption: Font { .system(size: size(-1)) }
+    var captionMedium: Font { .system(size: size(-1), weight: .medium) }
+    var captionSemibold: Font { .system(size: size(-1), weight: .semibold) }
+    var captionBold: Font { .system(size: size(-1), weight: .bold) }
+    var caption2: Font { .system(size: size(-2)) }
+    var caption2Medium: Font { .system(size: size(-2), weight: .medium) }
+    var actionIcon: Font { .system(size: size(1), weight: .medium) }
+    var chevron: Font { .system(size: max(8, CGFloat(baseSize - 3)), weight: .semibold) }
+    var emptyIcon: Font { .system(size: CGFloat(ShelfSettings.clampedContentBaseFontSize(baseSize) + 22)) }
+}
+
 struct ContentView: View {
     @EnvironmentObject private var monitor: ContextMonitor
+    @AppStorage(ShelfSettings.contentBaseFontSizeKey) private var contentBaseFontSize = ShelfSettings.defaultContentBaseFontSize
+
+    private var fonts: ContentFontScale {
+        ContentFontScale(baseSize: contentBaseFontSize)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -15,13 +52,14 @@ struct ContentView: View {
             Divider()
             statusBar
         }
+        .environment(\.contentBaseFontSize, contentBaseFontSize)
         .background(FloatingWindowAccessor(title: windowTitle))
     }
 
     private var contextPane: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Context")
-                .font(.headline)
+                .font(fonts.headline)
 
             if let hint = monitor.currentHint {
                 VStack(spacing: 4) {
@@ -41,11 +79,13 @@ struct ContentView: View {
                 if !monitor.similarMessages.isEmpty || !monitor.messageLocations.isEmpty {
                     ScrollView {
                         mailIntelligenceSection
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .layoutPriority(1)
                 } else if let hint = monitor.currentHint, hint.bundleIdentifier == "com.apple.mail", !monitor.mailSuggestionStatus.isEmpty {
                     Text(monitor.mailSuggestionStatus)
-                        .font(.caption)
+                        .font(fonts.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(3)
                         .fixedSize(horizontal: false, vertical: true)
@@ -58,7 +98,9 @@ struct ContentView: View {
                 )
             }
 
-            Spacer()
+            if monitor.similarMessages.isEmpty && monitor.messageLocations.isEmpty {
+                Spacer()
+            }
         }
         .padding(12)
     }
@@ -66,8 +108,8 @@ struct ContentView: View {
     private var actionsPane: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Automation")
-                    .font(.headline)
+                Text("Actions")
+                    .font(fonts.headline)
                 Spacer()
             }
 
@@ -83,37 +125,18 @@ struct ContentView: View {
                 )
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 10) {
+                    LazyVStack(spacing: 4) {
                         ForEach(monitor.actions) { action in
                             Button {
                                 Task {
                                     await monitor.run(action)
                                 }
                             } label: {
-                                HStack(spacing: 12) {
-                                    Image(systemName: action.systemImage)
-                                        .font(.system(size: 18))
-                                        .frame(width: 28)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(action.title)
-                                            .font(.body.weight(.medium))
-                                            .foregroundStyle(.primary)
-                                        Text(action.detail)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(2)
-                                    }
-                                    Spacer()
-                                    Image(systemName: "chevron.right")
-                                        .font(.caption)
-                                        .foregroundStyle(.tertiary)
-                                }
-                                .padding(12)
-                                .contentShape(Rectangle())
+                                AutomationActionRow(action: action)
                             }
                             .buttonStyle(.plain)
                             .background(Color(nsColor: .controlBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
                         }
                     }
                 }
@@ -135,13 +158,13 @@ struct ContentView: View {
                     .frame(width: 14, height: 14)
             }
             Text(statusText)
-                .font(.caption)
+                .font(fonts.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer()
             if let hint = monitor.currentHint {
                 Text(hint.applicationName)
-                    .font(.caption)
+                    .font(fonts.caption)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
@@ -154,6 +177,9 @@ struct ContentView: View {
     private var statusText: String {
         if monitor.isSearchingMessages {
             return "Searching similar messages"
+        }
+        if !monitor.statusText.isEmpty {
+            return monitor.statusText
         }
         if let hint = monitor.currentHint, hint.bundleIdentifier == "com.apple.mail", !monitor.mailSuggestionStatus.isEmpty {
             return monitor.mailSuggestionStatus
@@ -171,15 +197,15 @@ struct ContentView: View {
     private func detailRow(_ label: String, _ value: String, systemImage: String, lines: Int) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: systemImage)
-                .font(.caption)
+                .font(fonts.caption)
                 .frame(width: 14)
                 .foregroundStyle(.secondary)
             Text(label)
-                .font(.caption2.weight(.medium))
+                .font(fonts.caption2Medium)
                 .foregroundStyle(.secondary)
                 .frame(width: 38, alignment: .leading)
             Text(value)
-                .font(.caption)
+                .font(fonts.caption)
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
                 .lineLimit(lines)
@@ -191,18 +217,53 @@ struct ContentView: View {
 
     private var mailIntelligenceSection: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if monitor.isSummarizingSimilarMessages || !monitor.similarMessagesSummary.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "sparkles")
+                            .foregroundStyle(.secondary)
+                        Text("Apple Intelligence")
+                            .font(fonts.caption)
+                            .foregroundStyle(.secondary)
+                        if monitor.isSummarizingSimilarMessages {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.6)
+                                .frame(width: 14, height: 14)
+                        }
+                    }
+                    if !monitor.similarMessagesSummary.isEmpty {
+                        Text(monitor.similarMessagesSummary)
+                            .font(fonts.caption)
+                            .foregroundStyle(.primary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
             if !monitor.similarMessages.isEmpty {
                 Text("Similar Messages")
-                    .font(.caption)
+                    .font(fonts.caption)
                     .foregroundStyle(.secondary)
                 ForEach(monitor.similarMessages.prefix(10)) { message in
-                    SimilarMessageRow(message: message)
+                    Button {
+                        openSimilarMessage(message)
+                    } label: {
+                        SimilarMessageRow(message: message)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open in Mail")
                 }
             }
 
             if !monitor.messageLocations.isEmpty {
                 Text("Suggested Filing")
-                    .font(.caption)
+                    .font(fonts.caption)
                     .foregroundStyle(.secondary)
                     .padding(.top, monitor.similarMessages.isEmpty ? 0 : 4)
                 ForEach(monitor.messageLocations.prefix(5)) { location in
@@ -212,36 +273,91 @@ struct ContentView: View {
                             .frame(width: 18)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(location.displayPath)
-                                .font(.caption.weight(.medium))
+                                .font(fonts.captionMedium)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Text("\(location.hitCount) hit\(location.hitCount == 1 ? "" : "s")")
-                                .font(.caption2)
+                                .font(fonts.caption2)
                                 .foregroundStyle(.secondary)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func openSimilarMessage(_ message: SimilarMessage) {
+        let messageURL = URL(fileURLWithPath: message.path)
+        let mailURL = URL(fileURLWithPath: "/System/Applications/Mail.app")
+        let configuration = NSWorkspace.OpenConfiguration()
+
+        NSWorkspace.shared.open([messageURL], withApplicationAt: mailURL, configuration: configuration) { _, error in
+            if error != nil {
+                NSWorkspace.shared.open(messageURL)
             }
         }
     }
 }
 
+private struct AutomationActionRow: View {
+    @Environment(\.contentBaseFontSize) private var contentBaseFontSize
+    var action: AppAutomationAction
+
+    private var fonts: ContentFontScale {
+        ContentFontScale(baseSize: contentBaseFontSize)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: action.systemImage)
+                .font(fonts.actionIcon)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(action.title)
+                    .font(fonts.captionSemibold)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(action.detail)
+                    .font(fonts.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right")
+                .font(fonts.chevron)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+    }
+}
+
 private struct SimilarMessageRow: View {
+    @Environment(\.contentBaseFontSize) private var contentBaseFontSize
     var message: SimilarMessage
+
+    private var fonts: ContentFontScale {
+        ContentFontScale(baseSize: contentBaseFontSize)
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "envelope")
-                .font(.caption)
+                .font(fonts.caption)
                 .foregroundStyle(.secondary)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
                 Text(message.subject)
-                    .font(.caption.weight(.medium))
+                    .font(fonts.captionMedium)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(message.sender)
-                    .font(.caption2)
+                    .font(fonts.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 HStack(spacing: 4) {
@@ -251,48 +367,55 @@ private struct SimilarMessageRow: View {
                         Text(date, style: .date)
                     }
                 }
-                .font(.caption2)
+                .font(fonts.caption2)
                 .foregroundStyle(.tertiary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 private struct ContactPreview: View {
+    @Environment(\.contentBaseFontSize) private var contentBaseFontSize
     var contact: ContactClue
     var matchCount: Int
+
+    private var fonts: ContentFontScale {
+        ContentFontScale(baseSize: contentBaseFontSize)
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             avatar
             VStack(alignment: .leading, spacing: 5) {
                 Text("Contact Preview")
-                    .font(.caption)
+                    .font(fonts.caption)
                     .foregroundStyle(.secondary)
                 Text(contact.displayName)
-                    .font(.headline)
+                    .font(fonts.headline)
                     .lineLimit(2)
                 if !contact.organization.isEmpty {
                     Text(contact.organization)
-                        .font(.subheadline)
+                        .font(fonts.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 if let email = contact.emails.first {
                     Label(email, systemImage: "envelope")
-                        .font(.caption)
+                        .font(fonts.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 if let url = contact.urls.first {
                     Label(url.absoluteString, systemImage: "link")
-                        .font(.caption)
+                        .font(fonts.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 if matchCount > 1 {
                     Text("\(matchCount) contact matches; using the first match for actions.")
-                        .font(.caption)
+                        .font(fonts.caption)
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -315,7 +438,7 @@ private struct ContactPreview: View {
                     .clipShape(Circle())
             } else {
                 Text(contact.initials)
-                    .font(.caption.weight(.bold))
+                    .font(fonts.captionBold)
                     .foregroundStyle(.secondary)
             }
         }
@@ -324,18 +447,23 @@ private struct ContactPreview: View {
 }
 
 private struct ResultView: View {
+    @Environment(\.contentBaseFontSize) private var contentBaseFontSize
     var result: AutomationResult
+
+    private var fonts: ContentFontScale {
+        ContentFontScale(baseSize: contentBaseFontSize)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Label(result.title, systemImage: result.isError ? "xmark.circle" : "checkmark.circle")
-                .font(.subheadline.weight(.semibold))
+                .font(fonts.subheadlineSemibold)
                 .foregroundStyle(result.isError ? .red : .green)
             Text(result.message)
-                .font(.caption)
+                .font(fonts.caption)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
-                .lineLimit(3)
+                .lineLimit(result.shouldAutoClear ? 3 : 8)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -345,19 +473,24 @@ private struct ResultView: View {
 }
 
 private struct EmptyStateView: View {
+    @Environment(\.contentBaseFontSize) private var contentBaseFontSize
     var title: String
     var systemImage: String
     var message: String
 
+    private var fonts: ContentFontScale {
+        ContentFontScale(baseSize: contentBaseFontSize)
+    }
+
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: systemImage)
-                .font(.system(size: 34))
+                .font(fonts.emptyIcon)
                 .foregroundStyle(.secondary)
             Text(title)
-                .font(.headline)
+                .font(fonts.headline)
             Text(message)
-                .font(.subheadline)
+                .font(fonts.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
