@@ -63,18 +63,20 @@ final class SpotlightMessageRanker {
             return (cached.candidates, "\(cached.diagnostic) Cached.", false)
         }
 
-        async let senderMetadataSearch = SpotlightMailQuery.search(context: context, terms: terms, limit: maximumResults, mode: .sender)
         async let semanticMetadataSearch = SpotlightMailQuery.search(context: context, terms: terms, limit: maximumResults, mode: .semantic)
-        async let mailHeaderSearch = MailHeaderCache.shared.candidates(for: context, terms: terms, limit: maximumResults)
-        let (senderMetadataCandidates, semanticMetadataCandidates, mailHeaderCandidates) = await (
-            senderMetadataSearch,
+        async let globalHeaderSearch = MailHeaderCache.shared.globalCandidates(for: context, terms: terms, limit: maximumResults)
+        async let senderMetadataSearch = SpotlightMailQuery.search(context: context, terms: terms, limit: maximumResults, mode: .sender)
+        async let senderHeaderSearch = MailHeaderCache.shared.candidates(for: context, terms: terms, limit: maximumResults)
+        let (semanticMetadataCandidates, globalHeaderCandidates, senderMetadataCandidates, senderHeaderCandidates) = await (
             semanticMetadataSearch,
-            mailHeaderSearch
+            globalHeaderSearch,
+            senderMetadataSearch,
+            senderHeaderSearch
         )
 
         var merged: [MessageCandidate] = []
         var indexByPath: [String: Int] = [:]
-        for candidate in mailHeaderCandidates.candidates + senderMetadataCandidates + semanticMetadataCandidates {
+        for candidate in semanticMetadataCandidates + globalHeaderCandidates + senderMetadataCandidates + senderHeaderCandidates.candidates {
             if let existingIndex = indexByPath[candidate.path] {
                 merged[existingIndex] = mergedCandidate(merged[existingIndex], candidate)
                 continue
@@ -83,19 +85,22 @@ final class SpotlightMessageRanker {
             ranked.rank = merged.count + 1
             indexByPath[ranked.path] = merged.count
             merged.append(ranked)
-            if merged.count >= maximumResults * 2 {
+            if merged.count >= maximumResults * 4 {
                 break
             }
         }
 
         let diagnostics = [
-            senderMetadataCandidates.isEmpty
-                ? nil
-                : "Spotlight sender returned \(senderMetadataCandidates.count) email candidate\(senderMetadataCandidates.count == 1 ? "" : "s").",
             semanticMetadataCandidates.isEmpty
                 ? nil
                 : "Spotlight semantic returned \(semanticMetadataCandidates.count) email candidate\(semanticMetadataCandidates.count == 1 ? "" : "s").",
-            mailHeaderCandidates.diagnostic
+            globalHeaderCandidates.isEmpty
+                ? nil
+                : "Global header search returned \(globalHeaderCandidates.count) topic candidate\(globalHeaderCandidates.count == 1 ? "" : "s").",
+            senderMetadataCandidates.isEmpty
+                ? nil
+                : "Spotlight sender returned \(senderMetadataCandidates.count) email candidate\(senderMetadataCandidates.count == 1 ? "" : "s").",
+            senderHeaderCandidates.diagnostic
         ]
         .compactMap { $0 }
 
@@ -106,7 +111,7 @@ final class SpotlightMessageRanker {
         if !merged.isEmpty {
             spotlightCache[cacheKey] = (Date(), merged, diagnostic)
         }
-        return (merged, diagnostic, mailHeaderCandidates.requiresFullDiskAccess)
+        return (merged, diagnostic, senderHeaderCandidates.requiresFullDiskAccess)
     }
 
     private func mergedCandidate(_ existing: MessageCandidate, _ incoming: MessageCandidate) -> MessageCandidate {
@@ -1025,7 +1030,8 @@ private final class SpotlightMailQuery: NSObject {
         }
 
         var matchPredicates: [NSPredicate] = []
-        for needle in needles.prefix(6) {
+        let needleLimit = mode == .semantic ? 10 : 6
+        for needle in needles.prefix(needleLimit) {
             let pattern = "*\(needle)*"
             matchPredicates.append(NSPredicate(format: "%K ==[cd] %@", Self.queryStringKey, needle))
             matchPredicates.append(NSPredicate(format: "kMDItemTextContent LIKE[cd] %@", pattern))
@@ -1079,24 +1085,32 @@ private final class SpotlightMailQuery: NSObject {
     private func searchNeedles() -> [String] {
         var values: [String] = []
         let senderDomain = context.senderEmail?.split(separator: "@").last.map { String($0).lowercased() }
-        if let senderEmail = context.senderEmail, !senderEmail.isEmpty {
-            values.append(senderEmail)
-            if mode == .sender {
-                values.append(context.sender)
-            }
-        } else if let email = EmailAddress.first(in: context.sender) {
-            values.append(email)
-        }
-
         if mode == .semantic {
+            values.append(contentsOf: SubjectTokenizer.terms(from: context.subject, limit: 12))
+            values.append(contentsOf: SubjectTokenizer.terms(from: context.bodyPreview, limit: 24))
             values.append(contentsOf: terms.filter { term in
                 let term = term.lowercased()
                 return !term.contains("@")
                     && !term.contains(".")
                     && term != senderDomain
             })
-            values.append(contentsOf: SubjectTokenizer.terms(from: context.subject))
-            values.append(contentsOf: SubjectTokenizer.terms(from: context.bodyPreview).prefix(8))
+            if let senderEmail = context.senderEmail, !senderEmail.isEmpty {
+                values.append(senderEmail)
+                if let senderDomain {
+                    values.append(senderDomain)
+                }
+            }
+            values.append(context.sender)
+            return Array(NSOrderedSet(array: values.map {
+                $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            }.filter { $0.count >= 4 })) as? [String] ?? []
+        }
+
+        if let senderEmail = context.senderEmail, !senderEmail.isEmpty {
+            values.append(senderEmail)
+            values.append(context.sender)
+        } else if let email = EmailAddress.first(in: context.sender) {
+            values.append(email)
         }
 
         return Array(NSOrderedSet(array: values.map {
@@ -1331,6 +1345,48 @@ private actor MailHeaderCache {
             return []
         }
         return rankedCandidates(for: context, sender: sender, terms: terms, limit: limit)
+    }
+
+    func globalCandidates(for context: MailMessageContext, terms: [String], limit: Int) async -> [MessageCandidate] {
+        await loadIfNeeded()
+
+        let normalizedTerms = globalSearchTerms(for: context, terms: terms)
+        guard !normalizedTerms.isEmpty, limit > 0 else {
+            return []
+        }
+
+        return recordsByPath.values
+            .compactMap { record -> (MailHeaderRecord, Int)? in
+                let score = globalScore(record, terms: normalizedTerms, context: context)
+                guard score > 0 else {
+                    return nil
+                }
+                return (record, score)
+            }
+            .sorted { lhs, rhs in
+                if lhs.1 == rhs.1 {
+                    return (lhs.0.date ?? lhs.0.modifiedAt) > (rhs.0.date ?? rhs.0.modifiedAt)
+                }
+                return lhs.1 > rhs.1
+            }
+            .prefix(limit)
+            .enumerated()
+            .map { index, item in
+                let record = item.0
+                return MessageCandidate(
+                    path: record.path,
+                    rank: index + 1,
+                    supportsMailFiling: true,
+                    contributesSimilarMessage: true,
+                    mailboxInfo: MailboxInfo(mailboxPath: record.mailboxPath, accountHint: record.accountHint),
+                    header: MessageHeader(
+                        subject: record.subject,
+                        sender: record.sender,
+                        date: record.date.map(Date.init(timeIntervalSince1970:))
+                    ),
+                    bodyPreview: record.subject ?? ""
+                )
+            }
     }
 
     private func loadIfNeeded() async {
@@ -1616,6 +1672,77 @@ private actor MailHeaderCache {
             limit: folderLimit
         )
         return Array((messageCandidates + folderCandidates).prefix(limit))
+    }
+
+    private func globalSearchTerms(for context: MailMessageContext, terms: [String]) -> Set<String> {
+        let sender = normalizedEmail(context.senderEmail ?? context.sender)
+        let senderDomain = sender.split(separator: "@").last.map(String.init)
+        var values = SubjectTokenizer.terms(from: context.subject, limit: 12)
+        values.append(contentsOf: SubjectTokenizer.terms(from: context.bodyPreview, limit: 24))
+        values.append(contentsOf: terms)
+        return Set(values.map {
+            $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { term in
+            term.count >= 4
+                && !term.contains("@")
+                && !term.contains(".")
+                && term != sender
+                && term != senderDomain
+        })
+    }
+
+    private func globalScore(_ record: MailHeaderRecord, terms: Set<String>, context: MailMessageContext) -> Int {
+        let subject = (record.subject ?? "").lowercased()
+        let mailbox = record.mailboxPath.joined(separator: " ").lowercased()
+        let sender = (record.sender ?? "").lowercased()
+        let currentSubject = normalizedSubject(context.subject)
+        let recordSubject = normalizedSubject(record.subject ?? "")
+
+        var score = 0
+        if !currentSubject.isEmpty, currentSubject == recordSubject {
+            score += 90
+        }
+
+        for term in terms {
+            if subject.contains(term) {
+                score += 16
+            }
+            if mailbox.contains(term) {
+                score += 8
+            }
+            if sender.contains(term) {
+                score += 3
+            }
+        }
+
+        let senderNeedle = normalizedEmail(context.senderEmail ?? context.sender)
+        if !senderNeedle.isEmpty, record.emails.contains(senderNeedle) {
+            score += 6
+        }
+
+        return score
+    }
+
+    private func normalizedSubject(_ value: String) -> String {
+        var subject = value.lowercased()
+        while true {
+            let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("re:") {
+                subject = String(trimmed.dropFirst(3))
+            } else if trimmed.hasPrefix("fw:") {
+                subject = String(trimmed.dropFirst(3))
+            } else if trimmed.hasPrefix("fwd:") {
+                subject = String(trimmed.dropFirst(4))
+            } else {
+                subject = trimmed
+                break
+            }
+        }
+        return subject
+            .replacingOccurrences(of: #"\[[^\]]+\]"#, with: " ", options: .regularExpression)
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count > 2 }
+            .joined(separator: " ")
     }
 
     private func score(_ record: MailHeaderRecord, terms: Set<String>) -> Int {
