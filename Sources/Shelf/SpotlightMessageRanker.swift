@@ -171,6 +171,15 @@ final class SpotlightMessageRanker {
                     : "Global header search returned \(candidates.count) topic candidate\(candidates.count == 1 ? "" : "s")."
                 continuation.yield(SpotlightCandidateChunk(source: .globalHeader, candidates: candidates, diagnostic: diagnostic))
             }
+            let threadHeaderTask = Task {
+                let result = await MailHeaderCache.shared.threadCandidates(for: context, limit: maximumResults)
+                continuation.yield(SpotlightCandidateChunk(
+                    source: .threadHeader,
+                    candidates: result.candidates,
+                    diagnostic: result.diagnostic,
+                    requiresFullDiskAccess: result.requiresFullDiskAccess
+                ))
+            }
             let senderHeaderTask = Task {
                 let result = await MailHeaderCache.shared.candidates(for: context, terms: terms, limit: maximumResults)
                 continuation.yield(SpotlightCandidateChunk(
@@ -190,6 +199,7 @@ final class SpotlightMessageRanker {
                 _ = await threadSubjectTask.result
                 _ = await senderTask.result
                 _ = await globalHeaderTask.result
+                _ = await threadHeaderTask.result
                 _ = await senderHeaderTask.result
                 _ = await learnedTask.result
                 continuation.finish()
@@ -200,6 +210,7 @@ final class SpotlightMessageRanker {
                 threadSubjectTask.cancel()
                 senderTask.cancel()
                 globalHeaderTask.cancel()
+                threadHeaderTask.cancel()
                 senderHeaderTask.cancel()
                 learnedTask.cancel()
                 finishTask.cancel()
@@ -212,6 +223,7 @@ final class SpotlightMessageRanker {
             diagnosticsBySource[.semanticSpotlight],
             diagnosticsBySource[.threadSubjectSpotlight],
             diagnosticsBySource[.globalHeader],
+            diagnosticsBySource[.threadHeader],
             diagnosticsBySource[.senderSpotlight],
             diagnosticsBySource[.senderHeader],
             diagnosticsBySource[.learnedMoves]
@@ -772,6 +784,7 @@ private struct SpotlightCandidateChunk {
         case semanticSpotlight
         case threadSubjectSpotlight
         case globalHeader
+        case threadHeader
         case senderSpotlight
         case senderHeader
         case learnedMoves
@@ -1556,6 +1569,7 @@ private actor MailHeaderCache {
     private let cacheVersion = 2
     private let headerReadLimit = 32 * 1024
     private let foregroundScanBudget: TimeInterval = 1.2
+    private let foregroundThreadScanBudget: TimeInterval = 10
     private let foregroundMailboxBudget: TimeInterval = 0.45
     private let backgroundWarmInterval: TimeInterval = 15 * 60
     private let maximumStoredRecords = 120_000
@@ -1661,6 +1675,35 @@ private actor MailHeaderCache {
             }
     }
 
+    func threadCandidates(for context: MailMessageContext, limit: Int) async -> (candidates: [MessageCandidate], diagnostic: String, requiresFullDiskAccess: Bool) {
+        await loadIfNeeded()
+
+        let threadSubject = normalizedSubject(context.subject)
+        guard !threadSubject.isEmpty, limit > 0 else {
+            return ([], "Mail header thread search has no subject to search.", false)
+        }
+
+        let cached = rankedThreadCandidates(for: context, normalizedThreadSubject: threadSubject, limit: limit)
+        if cached.count >= min(2, limit) {
+            startBackgroundWarmIfNeeded()
+            return (cached, "Mail header thread search returned \(cached.count) local thread candidate\(cached.count == 1 ? "" : "s").", false)
+        }
+
+        let foreground = await foregroundThreadScan(context: context, normalizedThreadSubject: threadSubject, limit: limit)
+        if !foreground.isEmpty {
+            await save()
+            startBackgroundWarmIfNeeded()
+            return (foreground, "Mail header thread scan found \(foreground.count) local thread candidate\(foreground.count == 1 ? "" : "s").", false)
+        }
+
+        startBackgroundWarmIfNeeded()
+        let root = mailRoot.path
+        if !FileManager.default.isReadableFile(atPath: root) {
+            return ([], "Mail header thread search cannot read local Mail storage. Open Full Disk Access settings and add Shelf.", true)
+        }
+        return ([], "Mail header thread search found no local header matches; background warmup started.", false)
+    }
+
     private func loadIfNeeded() async {
         guard !loaded else {
             return
@@ -1696,6 +1739,12 @@ private actor MailHeaderCache {
             scan(root: mailRoot, sender: sender, deadline: deadline, stopAfterMatches: limit)
         }
         return rankedCandidates(for: context, sender: sender, terms: terms, limit: limit)
+    }
+
+    private func foregroundThreadScan(context: MailMessageContext, normalizedThreadSubject: String, limit: Int) async -> [MessageCandidate] {
+        let deadline = Date().addingTimeInterval(foregroundThreadScanBudget)
+        scan(root: mailRoot, sender: nil, deadline: deadline, stopAfterMatches: nil)
+        return rankedThreadCandidates(for: context, normalizedThreadSubject: normalizedThreadSubject, limit: limit)
     }
 
     private func startBackgroundWarmIfNeeded() {
@@ -1944,6 +1993,57 @@ private actor MailHeaderCache {
             limit: folderLimit
         )
         return Array((messageCandidates + folderCandidates).prefix(limit))
+    }
+
+    private func rankedThreadCandidates(
+        for context: MailMessageContext,
+        normalizedThreadSubject: String,
+        limit: Int
+    ) -> [MessageCandidate] {
+        guard !normalizedThreadSubject.isEmpty else {
+            return []
+        }
+
+        let contextSender = normalizedEmail(context.senderEmail ?? context.sender)
+        return recordsByPath.values
+            .compactMap { record -> (MailHeaderRecord, Int)? in
+                guard normalizedSubject(record.subject ?? "") == normalizedThreadSubject else {
+                    return nil
+                }
+
+                var score = 120
+                if !contextSender.isEmpty, record.emails.contains(contextSender) {
+                    score += 20
+                }
+                if record.path.contains("/Library/Mail/") {
+                    score += 6
+                }
+                return (record, score)
+            }
+            .sorted { lhs, rhs in
+                if lhs.1 == rhs.1 {
+                    return (lhs.0.date ?? lhs.0.modifiedAt) > (rhs.0.date ?? rhs.0.modifiedAt)
+                }
+                return lhs.1 > rhs.1
+            }
+            .prefix(limit)
+            .enumerated()
+            .map { index, item in
+                let record = item.0
+                return MessageCandidate(
+                    path: record.path,
+                    rank: index + 1,
+                    supportsMailFiling: true,
+                    contributesSimilarMessage: true,
+                    mailboxInfo: MailboxInfo(mailboxPath: record.mailboxPath, accountHint: record.accountHint),
+                    header: MessageHeader(
+                        subject: record.subject,
+                        sender: record.sender,
+                        date: record.date.map(Date.init(timeIntervalSince1970:))
+                    ),
+                    bodyPreview: record.subject ?? ""
+                )
+            }
     }
 
     private func globalSearchTerms(for context: MailMessageContext, terms: [String]) -> Set<String> {
