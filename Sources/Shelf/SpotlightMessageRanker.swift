@@ -373,16 +373,20 @@ final class SpotlightMessageRanker {
         }
 
         return merged.values
-            .sorted {
-                if preferHitCount, $0.hitCount != $1.hitCount {
-                    return $0.hitCount > $1.hitCount
+            .sorted { lhs, rhs in
+                if lhs.semanticScore != rhs.semanticScore {
+                    return lhs.semanticScore > rhs.semanticScore
                 }
-                let lhsScore = $0.score + min(Double($0.hitCount), 8) * 8
-                let rhsScore = $1.score + min(Double($1.hitCount), 8) * 8
-                if lhsScore == rhsScore {
-                    return $0.hitCount > $1.hitCount
+                if preferHitCount, lhs.hitCount != rhs.hitCount {
+                    return lhs.hitCount > rhs.hitCount
                 }
-                return lhsScore > rhsScore
+                if lhs.score != rhs.score {
+                    return lhs.score > rhs.score
+                }
+                if lhs.hitCount != rhs.hitCount {
+                    return lhs.hitCount > rhs.hitCount
+                }
+                return lhs.displayPath < rhs.displayPath
             }
             .prefix(5)
             .map { $0 }
