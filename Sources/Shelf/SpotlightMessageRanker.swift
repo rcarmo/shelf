@@ -70,7 +70,7 @@ final class SpotlightMessageRanker {
                         ranked.rank = merged.count + 1
                         indexByPath[ranked.path] = merged.count
                         merged.append(ranked)
-                        if merged.count >= maximumResults * 4 {
+                        if merged.count >= maximumResults * 8 {
                             break
                         }
                     }
@@ -148,6 +148,14 @@ final class SpotlightMessageRanker {
                     continuation.yield(SpotlightCandidateChunk(source: .semanticSpotlight, candidates: candidates, diagnostic: diagnostic))
                 }
             }
+            let threadSubjectTask = Task {
+                for await candidates in SpotlightMailQuery.stream(context: context, terms: terms, limit: maximumResults, mode: .threadSubject) {
+                    let diagnostic = candidates.isEmpty
+                        ? nil
+                        : "Spotlight thread subject returned \(candidates.count) email candidate\(candidates.count == 1 ? "" : "s")."
+                    continuation.yield(SpotlightCandidateChunk(source: .threadSubjectSpotlight, candidates: candidates, diagnostic: diagnostic))
+                }
+            }
             let senderTask = Task {
                 for await candidates in SpotlightMailQuery.stream(context: context, terms: terms, limit: maximumResults, mode: .sender) {
                     let diagnostic = candidates.isEmpty
@@ -179,6 +187,7 @@ final class SpotlightMessageRanker {
             }
             let finishTask = Task {
                 _ = await semanticTask.result
+                _ = await threadSubjectTask.result
                 _ = await senderTask.result
                 _ = await globalHeaderTask.result
                 _ = await senderHeaderTask.result
@@ -188,6 +197,7 @@ final class SpotlightMessageRanker {
 
             continuation.onTermination = { _ in
                 semanticTask.cancel()
+                threadSubjectTask.cancel()
                 senderTask.cancel()
                 globalHeaderTask.cancel()
                 senderHeaderTask.cancel()
@@ -200,6 +210,7 @@ final class SpotlightMessageRanker {
     private func streamingDiagnostic(from diagnosticsBySource: [SpotlightCandidateChunk.Source: String]) -> String {
         [
             diagnosticsBySource[.semanticSpotlight],
+            diagnosticsBySource[.threadSubjectSpotlight],
             diagnosticsBySource[.globalHeader],
             diagnosticsBySource[.senderSpotlight],
             diagnosticsBySource[.senderHeader],
@@ -759,6 +770,7 @@ private struct MessageCandidate {
 private struct SpotlightCandidateChunk {
     enum Source: Hashable {
         case semanticSpotlight
+        case threadSubjectSpotlight
         case globalHeader
         case senderSpotlight
         case senderHeader
@@ -927,6 +939,7 @@ private final class SpotlightMailQuery: NSObject {
     enum SearchMode {
         case sender
         case semantic
+        case threadSubject
     }
 
     private static var active: [UUID: SpotlightMailQuery] = [:]
@@ -945,11 +958,25 @@ private final class SpotlightMailQuery: NSObject {
     private var lastChunkSignature = ""
 
     private var settleDelay: TimeInterval {
-        mode == .semantic ? 0.75 : 0.15
+        switch mode {
+        case .semantic:
+            return 0.75
+        case .threadSubject:
+            return 0.45
+        case .sender:
+            return 0.15
+        }
     }
 
     private var timeoutDelay: TimeInterval {
-        mode == .semantic ? 3.0 : 0.85
+        switch mode {
+        case .semantic:
+            return 3.0
+        case .threadSubject:
+            return 2.0
+        case .sender:
+            return 0.85
+        }
     }
 
     static func search(context: MailMessageContext, terms: [String], limit: Int, mode: SearchMode) async -> [MessageCandidate] {
@@ -1136,9 +1163,15 @@ private final class SpotlightMailQuery: NSObject {
 
     private func candidates(from query: NSMetadataQuery) -> [MessageCandidate] {
         var seenPaths = Set<String>()
-        let inspectedLimit = mode == .semantic
-            ? min(max(limit * 30, 1_200), 3_000)
-            : min(max(limit * 2, 80), 160)
+        let inspectedLimit: Int
+        switch mode {
+        case .semantic:
+            inspectedLimit = min(max(limit * 30, 1_200), 3_000)
+        case .threadSubject:
+            inspectedLimit = min(max(limit * 40, 1_600), 5_000)
+        case .sender:
+            inspectedLimit = min(max(limit * 2, 80), 160)
+        }
         return Array(query.results.prefix(inspectedLimit))
             .enumerated()
             .compactMap { index, item -> MessageCandidate? in
@@ -1176,6 +1209,13 @@ private final class SpotlightMailQuery: NSObject {
         .lowercased()
 
         var score = 0
+        if mode == .threadSubject {
+            let contextSubject = normalizedSubject(context.subject)
+            let candidateSubject = normalizedSubject(candidate.header.subject ?? "")
+            if !contextSubject.isEmpty, contextSubject == candidateSubject {
+                score += 240
+            }
+        }
         if !senderNeedle.isEmpty, candidateSender == senderNeedle {
             score += 120
         } else if !senderNeedle.isEmpty, text.contains(senderNeedle) {
@@ -1207,12 +1247,41 @@ private final class SpotlightMailQuery: NSObject {
             .lowercased()
     }
 
+    private func normalizedSubject(_ value: String) -> String {
+        var subject = value.lowercased()
+        while true {
+            let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("re:") {
+                subject = String(trimmed.dropFirst(3))
+            } else if trimmed.hasPrefix("fw:") {
+                subject = String(trimmed.dropFirst(3))
+            } else if trimmed.hasPrefix("fwd:") {
+                subject = String(trimmed.dropFirst(4))
+            } else {
+                subject = trimmed
+                break
+            }
+        }
+        return subject
+            .replacingOccurrences(of: #"\[[^\]]+\]"#, with: " ", options: .regularExpression)
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count > 2 }
+            .joined(separator: " ")
+    }
+
     private func predicate() -> NSPredicate {
         let mailItem = mailItemPredicate()
         let needles = searchNeedles()
 
         guard !needles.isEmpty else {
             return mailItem
+        }
+
+        if mode == .threadSubject {
+            return NSCompoundPredicate(andPredicateWithSubpredicates: [
+                mailItem,
+                threadSubjectPredicate(needles: needles)
+            ])
         }
 
         var matchPredicates: [NSPredicate] = []
@@ -1234,6 +1303,19 @@ private final class SpotlightMailQuery: NSObject {
             mailItem,
             NSCompoundPredicate(orPredicateWithSubpredicates: matchPredicates)
         ])
+    }
+
+    private func threadSubjectPredicate(needles: [String]) -> NSPredicate {
+        let subjectTerms = needles.prefix(8).map { "*\($0)*" }
+        let perTermPredicates = subjectTerms.map { pattern in
+            NSCompoundPredicate(orPredicateWithSubpredicates: [
+                NSPredicate(format: "kMDItemSubject LIKE[cd] %@", pattern),
+                NSPredicate(format: "kMDItemTitle LIKE[cd] %@", pattern),
+                NSPredicate(format: "kMDItemDisplayName LIKE[cd] %@", pattern),
+                NSPredicate(format: "kMDItemTextContent LIKE[cd] %@", pattern)
+            ])
+        }
+        return NSCompoundPredicate(andPredicateWithSubpredicates: perTermPredicates)
     }
 
     private func mailItemPredicate() -> NSPredicate {
@@ -1271,6 +1353,10 @@ private final class SpotlightMailQuery: NSObject {
     private func searchNeedles() -> [String] {
         var values: [String] = []
         let senderDomain = context.senderEmail?.split(separator: "@").last.map { String($0).lowercased() }
+        if mode == .threadSubject {
+            return Array(NSOrderedSet(array: SubjectTokenizer.terms(from: normalizedSubject(context.subject), limit: 12))) as? [String] ?? []
+        }
+
         if mode == .semantic {
             values.append(contentsOf: SubjectTokenizer.terms(from: context.subject, limit: 12))
             values.append(contentsOf: SubjectTokenizer.terms(from: context.bodyPreview, limit: 24))
