@@ -1,6 +1,26 @@
 import Foundation
 import LatentSemanticMapping
 
+private func normalizedDisplayName(from value: String) -> String {
+    var cleaned = value
+    cleaned = cleaned.replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
+    cleaned = cleaned.replacingOccurrences(
+        of: #"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}"#,
+        with: " ",
+        options: [.regularExpression, .caseInsensitive]
+    )
+    cleaned = cleaned
+        .replacingOccurrences(of: "\"", with: " ")
+        .replacingOccurrences(of: "'", with: " ")
+        .lowercased()
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    while cleaned.contains("  ") {
+        cleaned = cleaned.replacingOccurrences(of: "  ", with: " ")
+    }
+    return cleaned
+}
+
 struct LearnedMoveRecommendation {
     var mailboxPath: [String]
     var accountHint: String?
@@ -177,12 +197,15 @@ actor MailMoveLearningStore {
         var scores: [String: Double] = [:]
         let currentTerms = Set(context.searchTerms)
         let currentSender = normalizedEmail(context.senderEmail ?? context.sender)
+        let currentSenderName = normalizedDisplayName(from: context.sender)
 
         for (displayPath, mailboxRecords) in grouped {
             var score = 0.0
             for record in mailboxRecords.prefix(20) {
-                if normalizedEmail(record.senderEmail ?? record.sender) == currentSender {
-                    score += 0.25
+                let recordSenderName = normalizedDisplayName(from: record.sender)
+                if normalizedEmail(record.senderEmail ?? record.sender) == currentSender
+                    || (!currentSenderName.isEmpty && currentSenderName == recordSenderName) {
+                    score += 0.60
                 }
                 let recordTerms = Set(SubjectTokenizer.terms(from: record.subject) + SubjectTokenizer.terms(from: record.bodyPreview))
                 let overlap = currentTerms.intersection(recordTerms).count
@@ -195,7 +218,11 @@ actor MailMoveLearningStore {
 
     private func exactSenderMatch(context: MailMessageContext, records: [LearnedMailMoveRecord]) -> Bool {
         let currentSender = normalizedEmail(context.senderEmail ?? context.sender)
-        return records.contains { normalizedEmail($0.senderEmail ?? $0.sender) == currentSender }
+        let currentSenderName = normalizedDisplayName(from: context.sender)
+        return records.contains {
+            normalizedEmail($0.senderEmail ?? $0.sender) == currentSender
+                || (!currentSenderName.isEmpty && currentSenderName == normalizedDisplayName(from: $0.sender))
+        }
     }
 
     private func trainingText(for context: MailMessageContext) -> String {

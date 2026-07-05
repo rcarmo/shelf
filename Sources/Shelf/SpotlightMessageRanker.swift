@@ -1,6 +1,26 @@
 import Foundation
 import LatentSemanticMapping
 
+private func normalizedDisplayName(from value: String) -> String {
+    var cleaned = MIMEHeaderDecoder.decode(value)
+    cleaned = cleaned.replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
+    cleaned = cleaned.replacingOccurrences(
+        of: #"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}"#,
+        with: " ",
+        options: [.regularExpression, .caseInsensitive]
+    )
+    cleaned = cleaned
+        .replacingOccurrences(of: "\"", with: " ")
+        .replacingOccurrences(of: "'", with: " ")
+        .lowercased()
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    while cleaned.contains("  ") {
+        cleaned = cleaned.replacingOccurrences(of: "  ", with: " ")
+    }
+    return cleaned
+}
+
 final class SpotlightMessageRanker {
     private let maximumResults = 80
     private let maximumTrainingMessagesPerMailbox = 8
@@ -449,6 +469,8 @@ final class SpotlightMessageRanker {
     private func relatedMessageScore(_ candidate: MessageCandidate, context: MailMessageContext) -> Double {
         let contextSender = normalizedSender(context.senderEmail ?? context.sender)
         let candidateSender = normalizedSender(candidate.header.sender ?? "")
+        let contextSenderName = normalizedSenderDisplayName(context.sender)
+        let candidateSenderName = normalizedSenderDisplayName(candidate.header.sender ?? "")
         let contextDomain = contextSender.split(separator: "@").last.map(String.init) ?? ""
         let candidateText = [
             candidate.header.sender ?? "",
@@ -474,20 +496,27 @@ final class SpotlightMessageRanker {
         let mailboxIntersection = mailboxTerms.intersection(contextTerms)
 
         var score = 0.0
-        let sameSender = !contextSender.isEmpty && candidateSender == contextSender
-        if sameSender {
-            score += 18
-        } else if !contextSender.isEmpty && candidateText.contains(contextSender) {
-            score += 10
-        }
-        if !contextDomain.isEmpty, candidateText.contains(contextDomain) {
-            score += 5
-        }
-
+        let sameSenderEmail = !contextSender.isEmpty && candidateSender == contextSender
+        let sameSenderName = !contextSenderName.isEmpty && contextSenderName == candidateSenderName
+        let sameSender = sameSenderEmail || sameSenderName
         let contextSubject = normalizedSubject(context.subject)
         let candidateSubject = normalizedSubject(candidate.header.subject ?? "")
-        if !contextSubject.isEmpty, contextSubject == candidateSubject {
-            score += 70
+        let sameThread = !contextSubject.isEmpty && contextSubject == candidateSubject
+        if sameThread && sameSender {
+            score += 180
+        } else {
+            if sameThread {
+                score += 90
+            }
+            if sameSender {
+                score += 95
+            }
+        }
+        if !sameSender, !contextSender.isEmpty, candidateText.contains(contextSender) {
+            score += 45
+        }
+        if !contextDomain.isEmpty, candidateText.contains(contextDomain) {
+            score += 18
         }
 
         score += Double(subjectIntersection.count) * 14
@@ -676,6 +705,10 @@ final class SpotlightMessageRanker {
         (EmailAddress.first(in: value) ?? value)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+    }
+
+    private func normalizedSenderDisplayName(_ value: String) -> String {
+        normalizedDisplayName(from: value)
     }
 
     private func accountComponent(in components: [String]) -> String? {
@@ -1216,6 +1249,8 @@ private final class SpotlightMailQuery: NSObject {
     private func relevanceScore(for candidate: MessageCandidate) -> Int {
         let senderNeedle = normalizedEmail(context.senderEmail ?? context.sender)
         let candidateSender = normalizedEmail(candidate.header.sender ?? "")
+        let contextSenderName = normalizedDisplayName(from: context.sender)
+        let candidateSenderName = normalizedDisplayName(from: candidate.header.sender ?? "")
         let text = [
             candidate.header.sender ?? "",
             candidate.header.subject ?? "",
@@ -1226,20 +1261,27 @@ private final class SpotlightMailQuery: NSObject {
         .lowercased()
 
         var score = 0
-        if mode == .threadSubject {
-            let contextSubject = normalizedSubject(context.subject)
-            let candidateSubject = normalizedSubject(candidate.header.subject ?? "")
-            if !contextSubject.isEmpty, contextSubject == candidateSubject {
+        let contextSubject = normalizedSubject(context.subject)
+        let candidateSubject = normalizedSubject(candidate.header.subject ?? "")
+        let sameThread = !contextSubject.isEmpty && contextSubject == candidateSubject
+        let sameSenderEmail = !senderNeedle.isEmpty && candidateSender == senderNeedle
+        let sameSenderName = !contextSenderName.isEmpty && contextSenderName == candidateSenderName
+        let sameSender = sameSenderEmail || sameSenderName
+        if sameThread && sameSender {
+            score += 420
+        } else {
+            if sameThread {
                 score += 240
             }
+            if sameSender {
+                score += 320
+            }
         }
-        if !senderNeedle.isEmpty, candidateSender == senderNeedle {
-            score += 120
-        } else if !senderNeedle.isEmpty, text.contains(senderNeedle) {
-            score += 80
+        if !sameSender, !senderNeedle.isEmpty, text.contains(senderNeedle) {
+            score += 220
         }
         if let domain = senderNeedle.split(separator: "@").last, text.contains(domain.lowercased()) {
-            score += 20
+            score += 60
         }
 
         let uniqueTerms = Set(terms.map { $0.lowercased() }.filter { $0.count >= 4 && $0 != senderNeedle })
@@ -2009,15 +2051,19 @@ private actor MailHeaderCache {
         }
 
         let contextSender = normalizedEmail(context.senderEmail ?? context.sender)
+        let contextSenderName = normalizedDisplayName(from: context.sender)
         return recordsByPath.values
             .compactMap { record -> (MailHeaderRecord, Int)? in
                 guard normalizedSubject(record.subject ?? "") == normalizedThreadSubject else {
                     return nil
                 }
 
-                var score = 120
-                if !contextSender.isEmpty, record.emails.contains(contextSender) {
-                    score += 20
+                var score = 180
+                let recordSenderName = normalizedDisplayName(from: record.sender ?? "")
+                let sameSender = (!contextSender.isEmpty && record.emails.contains(contextSender))
+                    || (!contextSenderName.isEmpty && contextSenderName == recordSenderName)
+                if sameSender {
+                    score += 180
                 }
                 if record.path.contains("/Library/Mail/") {
                     score += 6
@@ -2073,9 +2119,17 @@ private actor MailHeaderCache {
         let sender = (record.sender ?? "").lowercased()
         let currentSubject = normalizedSubject(context.subject)
         let recordSubject = normalizedSubject(record.subject ?? "")
+        let currentSenderName = normalizedDisplayName(from: context.sender)
+        let recordSenderName = normalizedDisplayName(from: record.sender ?? "")
 
         var score = 0
-        if !currentSubject.isEmpty, currentSubject == recordSubject {
+        let senderNeedle = normalizedEmail(context.senderEmail ?? context.sender)
+        let exactSender = !senderNeedle.isEmpty && record.emails.contains(senderNeedle)
+        let displaySender = !currentSenderName.isEmpty && currentSenderName == recordSenderName
+        let sameSender = exactSender || displaySender
+        if !currentSubject.isEmpty, currentSubject == recordSubject, sameSender {
+            score += 180
+        } else if !currentSubject.isEmpty, currentSubject == recordSubject {
             score += 90
         }
 
@@ -2087,13 +2141,12 @@ private actor MailHeaderCache {
                 score += 8
             }
             if sender.contains(term) {
-                score += 3
+                score += 8
             }
         }
 
-        let senderNeedle = normalizedEmail(context.senderEmail ?? context.sender)
-        if !senderNeedle.isEmpty, record.emails.contains(senderNeedle) {
-            score += 6
+        if sameSender {
+            score += 64
         }
 
         return score
