@@ -183,8 +183,14 @@ final class MailApplicationBridge {
         var candidates: [LogicalMailboxCandidate] = []
         for account in objectCollection(application, key: "accounts") {
             let accountName = stringValue(account, key: "name")
-            for mailbox in objectCollection(account, key: "mailboxes") {
-                let name = stringValue(mailbox, key: "name")
+            guard let mailboxes = account.value(forKey: "mailboxes") as? SBElementArray,
+                  let names = mailboxes.value(forKey: "name") as? [String],
+                  let containers = mailboxes.value(forKey: "container") as? [Any] else {
+                continue
+            }
+            let count = min(mailboxes.count, names.count, containers.count)
+            for index in 0..<count {
+                let name = names[index]
                 let normalizedName = name.lowercased()
                 let score = terms.reduce(0) { total, term in
                     let normalizedTerm = term.lowercased()
@@ -202,9 +208,17 @@ final class MailApplicationBridge {
                 guard score > 0 else {
                     continue
                 }
+                guard let mailbox = mailboxes.object(at: index) as? NSObject else {
+                    continue
+                }
                 candidates.append(LogicalMailboxCandidate(
                     mailbox: mailbox,
-                    path: [name],
+                    path: logicalMailboxPath(
+                        at: index,
+                        names: names,
+                        containers: containers,
+                        accountName: accountName
+                    ),
                     accountName: accountName.isEmpty ? nil : accountName,
                     score: score
                 ))
@@ -216,6 +230,33 @@ final class MailApplicationBridge {
             }
             return lhs.score > rhs.score
         }
+    }
+
+    private func logicalMailboxPath(
+        at index: Int,
+        names: [String],
+        containers: [Any],
+        accountName: String
+    ) -> [String] {
+        var path = [names[index]]
+        var currentIndex = index
+        var seen = Set(path)
+
+        while containers.indices.contains(currentIndex),
+              let container = containers[currentIndex] as? NSObject {
+            let parentName = stringValue(container, key: "name")
+            guard !parentName.isEmpty,
+                  parentName != accountName,
+                  seen.insert(parentName).inserted else {
+                break
+            }
+            path.insert(parentName, at: 0)
+            guard let parentIndex = names.firstIndex(of: parentName) else {
+                break
+            }
+            currentIndex = parentIndex
+        }
+        return path
     }
 
     private func logicalMessageScore(
