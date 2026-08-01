@@ -123,6 +123,7 @@ struct RankedMessageLocation: Identifiable, Equatable {
     var score: Double
     var semanticScore: Double
     var hitCount: Int
+    var recentHitCount: Int = 0
     var samplePath: String
 
     var mailboxName: String {

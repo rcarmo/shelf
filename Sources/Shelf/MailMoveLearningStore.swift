@@ -25,8 +25,9 @@ struct LearnedMoveRecommendation {
     var mailboxPath: [String]
     var accountHint: String?
     var displayPath: String
-    var semanticScore: Double
+    var memoryScore: Double
     var exampleCount: Int
+    var senderMatchCount: Int
     var lastMovedAt: TimeInterval
     var sampleText: String
 }
@@ -73,29 +74,29 @@ actor MailMoveLearningStore {
 
         let grouped = Dictionary(grouping: records, by: \.displayPath)
         let lsmScores = semanticScores(for: context, grouped: grouped)
-        let fallbackScores = fallbackScores(for: context, grouped: grouped)
 
         return grouped.compactMap { displayPath, mailboxRecords -> LearnedMoveRecommendation? in
-            guard let latest = mailboxRecords.max(by: { $0.createdAt < $1.createdAt }) else {
-                return nil
-            }
-            let semanticScore = lsmScores[displayPath] ?? fallbackScores[displayPath] ?? 0
-            guard semanticScore > 0 || exactSenderMatch(context: context, records: mailboxRecords) else {
+            let summary = matchSummary(for: context, records: mailboxRecords)
+            let lsmScore = max(0, min(lsmScores[displayPath] ?? 0, 1))
+            let memoryScore = summary.score + (lsmScore * 0.35)
+            guard memoryScore >= 0.20,
+                  let example = summary.bestRecord ?? mailboxRecords.max(by: { $0.createdAt < $1.createdAt }) else {
                 return nil
             }
             return LearnedMoveRecommendation(
-                mailboxPath: latest.mailboxPath,
-                accountHint: latest.accountHint,
+                mailboxPath: example.mailboxPath,
+                accountHint: example.accountHint,
                 displayPath: displayPath,
-                semanticScore: semanticScore,
-                exampleCount: mailboxRecords.count,
-                lastMovedAt: latest.createdAt,
-                sampleText: latest.semanticText
+                memoryScore: memoryScore,
+                exampleCount: max(1, summary.matchCount),
+                senderMatchCount: summary.senderMatchCount,
+                lastMovedAt: summary.lastMatchedAt ?? example.createdAt,
+                sampleText: example.semanticText
             )
         }
         .sorted { lhs, rhs in
-            let lhsScore = lhs.semanticScore + min(Double(lhs.exampleCount), 6) * 0.03 + recencyBoost(lhs.lastMovedAt)
-            let rhsScore = rhs.semanticScore + min(Double(rhs.exampleCount), 6) * 0.03 + recencyBoost(rhs.lastMovedAt)
+            let lhsScore = lhs.memoryScore + recencyBoost(lhs.lastMovedAt)
+            let rhsScore = rhs.memoryScore + recencyBoost(rhs.lastMovedAt)
             if lhsScore == rhsScore {
                 return lhs.lastMovedAt > rhs.lastMovedAt
             }
@@ -190,39 +191,77 @@ actor MailMoveLearningStore {
         return scores
     }
 
-    private func fallbackScores(
+    private func matchSummary(
         for context: MailMessageContext,
-        grouped: [String: [LearnedMailMoveRecord]]
-    ) -> [String: Double] {
-        var scores: [String: Double] = [:]
-        let currentTerms = Set(context.searchTerms)
+        records: [LearnedMailMoveRecord]
+    ) -> LearnedMoveMatchSummary {
         let currentSender = normalizedEmail(context.senderEmail ?? context.sender)
         let currentSenderName = normalizedDisplayName(from: context.sender)
+        let currentSubject = normalizedSubject(context.subject)
+        let currentSubjectTerms = Set(SubjectTokenizer.terms(from: context.subject, limit: 12))
+        let currentBodyTerms = Set(SubjectTokenizer.terms(from: context.bodyPreview, limit: 30))
+        let currentTerms = Set(context.searchTerms.filter { $0.count >= 4 && !$0.contains("@") })
 
-        for (displayPath, mailboxRecords) in grouped {
-            var score = 0.0
-            for record in mailboxRecords.prefix(20) {
+        let matches = records
+            .sorted { $0.createdAt > $1.createdAt }
+            .prefix(40)
+            .compactMap { record -> LearnedMoveRecordMatch? in
+                let recordSender = normalizedEmail(record.senderEmail ?? record.sender)
                 let recordSenderName = normalizedDisplayName(from: record.sender)
-                if normalizedEmail(record.senderEmail ?? record.sender) == currentSender
-                    || (!currentSenderName.isEmpty && currentSenderName == recordSenderName) {
-                    score += 0.60
-                }
-                let recordTerms = Set(SubjectTokenizer.terms(from: record.subject) + SubjectTokenizer.terms(from: record.bodyPreview))
-                let overlap = currentTerms.intersection(recordTerms).count
-                score += min(Double(overlap) * 0.04, 0.24)
-            }
-            scores[displayPath] = score
-        }
-        return scores
-    }
+                let sameSender = (!currentSender.isEmpty && currentSender == recordSender)
+                    || (!currentSenderName.isEmpty && currentSenderName == recordSenderName)
+                let sameThread = !currentSubject.isEmpty && currentSubject == normalizedSubject(record.subject)
+                let subjectSimilarity = jaccard(
+                    currentSubjectTerms,
+                    Set(SubjectTokenizer.terms(from: record.subject, limit: 12))
+                )
+                let bodySimilarity = jaccard(
+                    currentBodyTerms,
+                    Set(SubjectTokenizer.terms(from: record.bodyPreview, limit: 30))
+                )
+                let recordTerms = Set(
+                    SubjectTokenizer.terms(from: record.subject, limit: 12)
+                        + SubjectTokenizer.terms(from: record.bodyPreview, limit: 30)
+                )
+                let generalSimilarity = jaccard(currentTerms, recordTerms)
 
-    private func exactSenderMatch(context: MailMessageContext, records: [LearnedMailMoveRecord]) -> Bool {
-        let currentSender = normalizedEmail(context.senderEmail ?? context.sender)
-        let currentSenderName = normalizedDisplayName(from: context.sender)
-        return records.contains {
-            normalizedEmail($0.senderEmail ?? $0.sender) == currentSender
-                || (!currentSenderName.isEmpty && currentSenderName == normalizedDisplayName(from: $0.sender))
+                var score = 0.0
+                if sameSender {
+                    score += 0.95
+                }
+                if sameThread {
+                    score += 0.80
+                }
+                score += subjectSimilarity * 0.55
+                score += bodySimilarity * 0.30
+                score += generalSimilarity * 0.25
+
+                guard score >= 0.18 else {
+                    return nil
+                }
+                let weightedScore = score * (0.75 + (recencyWeight(record.createdAt) * 0.25))
+                return LearnedMoveRecordMatch(record: record, score: weightedScore, sameSender: sameSender)
+            }
+
+        guard let best = matches.max(by: { $0.score < $1.score }) else {
+            return .empty
         }
+
+        let rankedMatches = matches.sorted { $0.score > $1.score }
+        let supportingScore = rankedMatches.dropFirst().prefix(4).reduce(0) { $0 + ($1.score * 0.18) }
+        let senderMatchCount = matches.filter(\.sameSender).count
+        let frequencyBoost = min(Double(matches.count), 6) * 0.05
+        let senderFrequencyBoost = min(Double(senderMatchCount), 6) * 0.09
+        let mostRecent = matches.map(\.record.createdAt).max()
+        let recentBoost = mostRecent.map { recencyWeight($0) * 0.15 } ?? 0
+
+        return LearnedMoveMatchSummary(
+            score: best.score + supportingScore + frequencyBoost + senderFrequencyBoost + recentBoost,
+            matchCount: matches.count,
+            senderMatchCount: senderMatchCount,
+            lastMatchedAt: mostRecent,
+            bestRecord: best.record
+        )
     }
 
     private func trainingText(for context: MailMessageContext) -> String {
@@ -233,6 +272,50 @@ actor MailMoveLearningStore {
         (EmailAddress.first(in: value) ?? value)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+    }
+
+    private func normalizedSubject(_ value: String) -> String {
+        var subject = value.lowercased()
+        while true {
+            let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("re:") || trimmed.hasPrefix("fw:") {
+                subject = String(trimmed.dropFirst(3))
+            } else if trimmed.hasPrefix("fwd:") {
+                subject = String(trimmed.dropFirst(4))
+            } else {
+                subject = trimmed
+                break
+            }
+        }
+        return subject
+            .replacingOccurrences(of: #"\[[^\]]+\]"#, with: " ", options: .regularExpression)
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count > 2 }
+            .joined(separator: " ")
+    }
+
+    private func jaccard(_ lhs: Set<String>, _ rhs: Set<String>) -> Double {
+        let union = lhs.union(rhs)
+        guard !union.isEmpty else {
+            return 0
+        }
+        return Double(lhs.intersection(rhs).count) / Double(union.count)
+    }
+
+    private func recencyWeight(_ timestamp: TimeInterval) -> Double {
+        let ageInDays = max(0, Date().timeIntervalSince1970 - timestamp) / (60 * 60 * 24)
+        switch ageInDays {
+        case ...7:
+            return 1
+        case ...30:
+            return 0.80
+        case ...90:
+            return 0.55
+        case ...365:
+            return 0.25
+        default:
+            return 0.10
+        }
     }
 
     private func recencyBoost(_ timestamp: TimeInterval) -> Double {
@@ -247,6 +330,28 @@ actor MailMoveLearningStore {
             .appendingPathComponent("Shelf", isDirectory: true)
             .appendingPathComponent("MailMoveLearning.json")
     }
+}
+
+private struct LearnedMoveRecordMatch {
+    var record: LearnedMailMoveRecord
+    var score: Double
+    var sameSender: Bool
+}
+
+private struct LearnedMoveMatchSummary {
+    var score: Double
+    var matchCount: Int
+    var senderMatchCount: Int
+    var lastMatchedAt: TimeInterval?
+    var bestRecord: LearnedMailMoveRecord?
+
+    static let empty = LearnedMoveMatchSummary(
+        score: 0,
+        matchCount: 0,
+        senderMatchCount: 0,
+        lastMatchedAt: nil,
+        bestRecord: nil
+    )
 }
 
 private struct LearnedMailMovePayload: Codable {

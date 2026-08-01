@@ -146,8 +146,13 @@ final class SpotlightMessageRanker {
                 )
             }
 
-            let locations = groupedLocations(from: ranked, currentMailbox: context.currentMailbox, context: context)
             let messages = similarMessages(from: ranked, context: context)
+            let rankedLocations = groupedLocations(from: ranked, currentMailbox: context.currentMailbox, context: context)
+            let locations = locationsIncludingVisibleMessageFolders(
+                rankedLocations,
+                messages: messages,
+                candidates: ranked
+            )
             let lsmDiagnostic = "LSM ranked \(locations.count) filing destination\(locations.count == 1 ? "" : "s")."
             return MailSuggestions(
                 locations: locations,
@@ -211,8 +216,26 @@ final class SpotlightMessageRanker {
             }
             let learnedTask = Task {
                 let candidates = await learnedMoveCandidates(for: context, limit: 8)
-                let diagnostic = "Learned LSM ranked \(candidates.count) destination\(candidates.count == 1 ? "" : "s")."
+                let diagnostic = "Filing memory ranked \(candidates.count) destination\(candidates.count == 1 ? "" : "s")."
                 continuation.yield(SpotlightCandidateChunk(source: .learnedMoves, candidates: candidates, diagnostic: diagnostic))
+            }
+            let logicalMailTask = Task {
+                let records = await MailLogicalMessageSearch.shared.messages(for: context, limit: maximumResults)
+                let candidates = records.enumerated().map { index, record in
+                    MessageCandidate(
+                        path: "shelf-mail-message://\(record.libraryID)",
+                        rank: index + 1,
+                        supportsMailFiling: true,
+                        contributesSimilarMessage: true,
+                        mailboxInfo: MailboxInfo(mailboxPath: record.mailboxPath, accountHint: record.accountName),
+                        header: MessageHeader(subject: record.subject, sender: record.sender, date: record.date),
+                        bodyPreview: record.subject
+                    )
+                }
+                let diagnostic = candidates.isEmpty
+                    ? nil
+                    : "Mail logical search returned \(candidates.count) candidate\(candidates.count == 1 ? "" : "s")."
+                continuation.yield(SpotlightCandidateChunk(source: .logicalMail, candidates: candidates, diagnostic: diagnostic))
             }
             let finishTask = Task {
                 _ = await semanticTask.result
@@ -222,6 +245,7 @@ final class SpotlightMessageRanker {
                 _ = await threadHeaderTask.result
                 _ = await senderHeaderTask.result
                 _ = await learnedTask.result
+                _ = await logicalMailTask.result
                 continuation.finish()
             }
 
@@ -233,6 +257,7 @@ final class SpotlightMessageRanker {
                 threadHeaderTask.cancel()
                 senderHeaderTask.cancel()
                 learnedTask.cancel()
+                logicalMailTask.cancel()
                 finishTask.cancel()
             }
         }
@@ -246,7 +271,8 @@ final class SpotlightMessageRanker {
             diagnosticsBySource[.threadHeader],
             diagnosticsBySource[.senderSpotlight],
             diagnosticsBySource[.senderHeader],
-            diagnosticsBySource[.learnedMoves]
+            diagnosticsBySource[.learnedMoves],
+            diagnosticsBySource[.logicalMail]
         ]
         .compactMap { $0 }
         .joined(separator: " ")
@@ -268,6 +294,9 @@ final class SpotlightMessageRanker {
         }
         merged.supportsMailFiling = existing.supportsMailFiling || incoming.supportsMailFiling
         merged.contributesSimilarMessage = existing.contributesSimilarMessage || incoming.contributesSimilarMessage
+        merged.filingMemoryScore = max(existing.filingMemoryScore, incoming.filingMemoryScore)
+        merged.filingMemoryCount = max(existing.filingMemoryCount, incoming.filingMemoryCount)
+        merged.senderMemoryCount = max(existing.senderMemoryCount, incoming.senderMemoryCount)
         if merged.mailboxInfo.mailboxPath == ["Mail"], incoming.mailboxInfo.mailboxPath != ["Mail"] {
             merged.mailboxInfo = incoming.mailboxInfo
         }
@@ -288,7 +317,10 @@ final class SpotlightMessageRanker {
                     sender: nil,
                     date: Date(timeIntervalSince1970: recommendation.lastMovedAt)
                 ),
-                bodyPreview: recommendation.sampleText
+                bodyPreview: recommendation.sampleText,
+                filingMemoryScore: recommendation.memoryScore,
+                filingMemoryCount: recommendation.exampleCount,
+                senderMemoryCount: recommendation.senderMatchCount
             )
         }
     }
@@ -320,45 +352,69 @@ final class SpotlightMessageRanker {
         let similarBackedLocations = groupedLocations(
             from: usableCandidates.filter(\.contributesSimilarMessage),
             semanticScores: semanticScores,
-            allowCatalogBoost: false
+            allowCatalogBoost: false,
+            context: context
         )
 
         if !similarBackedLocations.isEmpty {
             let strongLearnedLocations = groupedLocations(
-                from: usableCandidates.filter { $0.isLearnedMoveCandidate },
+                from: usableCandidates.filter { $0.isLearnedMoveCandidate && $0.filingMemoryScore >= 0.35 },
                 semanticScores: semanticScores,
-                allowCatalogBoost: false
+                allowCatalogBoost: false,
+                context: context
             )
-            .filter { $0.semanticScore >= 0.12 }
 
             return rankedLocations(similarBackedLocations + strongLearnedLocations, preferHitCount: true)
         }
 
-        let fallbackLocations = groupedLocations(
-            from: usableCandidates.filter { !$0.contributesSimilarMessage },
+        let learnedFallbackLocations = groupedLocations(
+            from: usableCandidates.filter { $0.isLearnedMoveCandidate },
             semanticScores: semanticScores,
-            allowCatalogBoost: false
+            allowCatalogBoost: false,
+            context: context
+        )
+        let catalogFallbackLocations = groupedLocations(
+            from: usableCandidates.filter { !$0.contributesSimilarMessage && !$0.isLearnedMoveCandidate },
+            semanticScores: semanticScores,
+            allowCatalogBoost: false,
+            context: context
         )
         .filter { $0.semanticScore >= 0.18 || $0.hitCount > 1 }
 
-        return rankedLocations(fallbackLocations, preferHitCount: false)
+        return rankedLocations(learnedFallbackLocations + catalogFallbackLocations, preferHitCount: false)
     }
 
     private func groupedLocations(
         from candidates: [MessageCandidate],
         semanticScores: [String: Double],
-        allowCatalogBoost: Bool
+        allowCatalogBoost: Bool,
+        context: MailMessageContext
     ) -> [RankedMessageLocation] {
         var grouped: [String: RankedMessageLocation] = [:]
+        let recentCutoff = Date().addingTimeInterval(-(90 * 24 * 60 * 60))
 
         for candidate in candidates {
             let displayPath = candidate.mailboxInfo.mailboxPath.joined(separator: " / ")
             let semanticScore = semanticScores[displayPath] ?? 0
             let catalogBoost = !candidate.contributesSimilarMessage && allowCatalogBoost ? Double(maximumResults / 3) : 0
             let similarHitBoost = candidate.contributesSimilarMessage ? Double(maximumResults / 3) : 0
-            let relevance = Double(max(1, maximumResults - candidate.rank + 1)) + (semanticScore * Double(maximumResults)) + catalogBoost + similarHitBoost
+            let senderAndThreadBoost = filingSimilarityScore(candidate, context: context) * Double(maximumResults)
+            let memoryBoost = candidate.filingMemoryScore * Double(maximumResults * 2)
+                + min(Double(candidate.filingMemoryCount), 6) * 8
+                + min(Double(candidate.senderMemoryCount), 6) * 12
+            let relevance = Double(max(1, maximumResults - candidate.rank + 1))
+                + (semanticScore * Double(maximumResults))
+                + senderAndThreadBoost
+                + memoryBoost
+                + catalogBoost
+                + similarHitBoost
             if var existing = grouped[displayPath] {
                 existing.hitCount += 1
+                if candidate.contributesSimilarMessage,
+                   let date = candidate.header.date,
+                   date >= recentCutoff {
+                    existing.recentHitCount += 1
+                }
                 existing.score = candidate.contributesSimilarMessage
                     ? existing.score + relevance
                     : max(existing.score, relevance)
@@ -371,6 +427,8 @@ final class SpotlightMessageRanker {
                     score: relevance,
                     semanticScore: semanticScore,
                     hitCount: 1,
+                    recentHitCount: candidate.contributesSimilarMessage
+                        && candidate.header.date.map { $0 >= recentCutoff } == true ? 1 : 0,
                     samplePath: candidate.path
                 )
             }
@@ -379,11 +437,40 @@ final class SpotlightMessageRanker {
         return Array(grouped.values)
     }
 
+    private func filingSimilarityScore(_ candidate: MessageCandidate, context: MailMessageContext) -> Double {
+        let contextSender = normalizedSender(context.senderEmail ?? context.sender)
+        let candidateSender = normalizedSender(candidate.header.sender ?? "")
+        let contextSenderName = normalizedSenderDisplayName(context.sender)
+        let candidateSenderName = normalizedSenderDisplayName(candidate.header.sender ?? "")
+        let sameSender = (!contextSender.isEmpty && contextSender == candidateSender)
+            || (!contextSenderName.isEmpty && contextSenderName == candidateSenderName)
+        let sameThread = !normalizedSubject(context.subject).isEmpty
+            && normalizedSubject(context.subject) == normalizedSubject(candidate.header.subject ?? "")
+
+        var score = sameSender ? 1.20 : 0
+        if sameThread {
+            score += 0.90
+        }
+        if candidate.isLogicalMailCandidate {
+            score += 0.50
+        }
+
+        let contextSubjectTerms = Set(SubjectTokenizer.terms(from: context.subject, limit: 12))
+        let candidateSubjectTerms = Set(SubjectTokenizer.terms(from: candidate.header.subject ?? "", limit: 12))
+        let subjectUnion = contextSubjectTerms.union(candidateSubjectTerms)
+        if !subjectUnion.isEmpty {
+            score += Double(contextSubjectTerms.intersection(candidateSubjectTerms).count)
+                / Double(subjectUnion.count) * 0.45
+        }
+        return score
+    }
+
     private func rankedLocations(_ locations: [RankedMessageLocation], preferHitCount: Bool) -> [RankedMessageLocation] {
         var merged: [String: RankedMessageLocation] = [:]
         for location in locations {
             if var existing = merged[location.displayPath] {
-                existing.hitCount += location.hitCount
+                existing.hitCount = max(existing.hitCount, location.hitCount)
+                existing.recentHitCount = max(existing.recentHitCount, location.recentHitCount)
                 existing.score += location.score
                 existing.semanticScore = max(existing.semanticScore, location.semanticScore)
                 merged[location.displayPath] = existing
@@ -394,14 +481,19 @@ final class SpotlightMessageRanker {
 
         return merged.values
             .sorted { lhs, rhs in
-                if lhs.semanticScore != rhs.semanticScore {
-                    return lhs.semanticScore > rhs.semanticScore
+                let lhsHasStrongHitEvidence = lhs.recentHitCount >= 3 || lhs.hitCount >= 5
+                let rhsHasStrongHitEvidence = rhs.recentHitCount >= 3 || rhs.hitCount >= 5
+                if lhsHasStrongHitEvidence != rhsHasStrongHitEvidence {
+                    return lhsHasStrongHitEvidence
+                }
+                if lhs.score != rhs.score {
+                    return lhs.score > rhs.score
                 }
                 if preferHitCount, lhs.hitCount != rhs.hitCount {
                     return lhs.hitCount > rhs.hitCount
                 }
-                if lhs.score != rhs.score {
-                    return lhs.score > rhs.score
+                if lhs.semanticScore != rhs.semanticScore {
+                    return lhs.semanticScore > rhs.semanticScore
                 }
                 if lhs.hitCount != rhs.hitCount {
                     return lhs.hitCount > rhs.hitCount
@@ -423,6 +515,71 @@ final class SpotlightMessageRanker {
             return nil
         }
         return value
+    }
+
+    private func locationsIncludingVisibleMessageFolders(
+        _ locations: [RankedMessageLocation],
+        messages: [SimilarMessage],
+        candidates: [MessageCandidate]
+    ) -> [RankedMessageLocation] {
+        let visibleGroups = Dictionary(grouping: messages.filter { message in
+            !message.mailboxPath.isEmpty
+                && message.mailboxPath != ["Mail"]
+                && !isExcludedMailbox(message.mailboxPath)
+        }) { message in
+            message.mailboxPath.joined(separator: "\u{1F}")
+        }
+        .values
+        .filter { $0.count >= 2 }
+        .sorted { lhs, rhs in
+            if lhs.count != rhs.count {
+                return lhs.count > rhs.count
+            }
+            let lhsDate = lhs.compactMap(\.date).max() ?? .distantPast
+            let rhsDate = rhs.compactMap(\.date).max() ?? .distantPast
+            return lhsDate > rhsDate
+        }
+
+        guard !visibleGroups.isEmpty else {
+            return locations
+        }
+
+        var locationByKey = Dictionary(uniqueKeysWithValues: locations.map {
+            ($0.mailboxPath.joined(separator: "\u{1F}"), $0)
+        })
+        let recentCutoff = Date().addingTimeInterval(-(90 * 24 * 60 * 60))
+        var prioritized: [RankedMessageLocation] = []
+
+        for group in visibleGroups {
+            guard let message = group.first else {
+                continue
+            }
+            let key = message.mailboxPath.joined(separator: "\u{1F}")
+            if var location = locationByKey.removeValue(forKey: key) {
+                location.hitCount = max(location.hitCount, group.count)
+                location.recentHitCount = max(location.recentHitCount, group.filter { ($0.date ?? .distantPast) >= recentCutoff }.count)
+                prioritized.append(location)
+                continue
+            }
+
+            let candidate = candidates.first {
+                $0.mailboxInfo.mailboxPath.joined(separator: "\u{1F}") == key
+            }
+            prioritized.append(RankedMessageLocation(
+                mailboxPath: message.mailboxPath,
+                accountHint: appleScriptAccountHint(candidate?.mailboxInfo.accountHint),
+                score: Double(group.count * maximumResults),
+                semanticScore: 0,
+                hitCount: group.count,
+                recentHitCount: group.filter { ($0.date ?? .distantPast) >= recentCutoff }.count,
+                samplePath: message.path
+            ))
+        }
+
+        let remaining = locations.filter {
+            locationByKey[$0.mailboxPath.joined(separator: "\u{1F}")] != nil
+        }
+        return Array((prioritized + remaining).prefix(5))
     }
 
     private func similarMessages(from candidates: [MessageCandidate], context: MailMessageContext) -> [SimilarMessage] {
@@ -496,6 +653,9 @@ final class SpotlightMessageRanker {
         let mailboxIntersection = mailboxTerms.intersection(contextTerms)
 
         var score = 0.0
+        if candidate.isLogicalMailCandidate {
+            score += 40
+        }
         let sameSenderEmail = !contextSender.isEmpty && candidateSender == contextSender
         let sameSenderName = !contextSenderName.isEmpty && contextSenderName == candidateSenderName
         let sameSender = sameSenderEmail || sameSenderName
@@ -810,9 +970,16 @@ private struct MessageCandidate {
     var mailboxInfo: MailboxInfo
     var header: MessageHeader
     var bodyPreview: String
+    var filingMemoryScore: Double = 0
+    var filingMemoryCount: Int = 0
+    var senderMemoryCount: Int = 0
 
     var isLearnedMoveCandidate: Bool {
         path.hasPrefix("shelf-learning://")
+    }
+
+    var isLogicalMailCandidate: Bool {
+        path.hasPrefix("shelf-mail-message://")
     }
 }
 
@@ -825,6 +992,7 @@ private struct SpotlightCandidateChunk {
         case senderSpotlight
         case senderHeader
         case learnedMoves
+        case logicalMail
     }
 
     var source: Source
@@ -1475,7 +1643,7 @@ private final class SpotlightMailQuery: NSObject {
         return MessageCandidate(
             path: path,
             rank: rank,
-            supportsMailFiling: path.contains("/Library/Mail/") && mailboxInfo.mailboxPath != ["Mail"],
+            supportsMailFiling: mailboxInfo.mailboxPath != ["Mail"],
             contributesSimilarMessage: true,
             mailboxInfo: mailboxInfo,
             header: MessageHeader(

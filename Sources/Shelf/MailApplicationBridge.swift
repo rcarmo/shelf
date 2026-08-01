@@ -19,6 +19,25 @@ struct MailBridgeResult {
     var succeeded: Bool { error == nil }
 }
 
+struct MailLogicalMessageRecord {
+    var libraryID: Int
+    var subject: String
+    var sender: String
+    var date: Date?
+    var mailboxPath: [String]
+    var accountName: String?
+}
+
+actor MailLogicalMessageSearch {
+    static let shared = MailLogicalMessageSearch()
+
+    private let bridge = MailApplicationBridge()
+
+    func messages(for context: MailMessageContext, limit: Int) -> [MailLogicalMessageRecord] {
+        bridge.logicalMessages(for: context, limit: limit)
+    }
+}
+
 final class MailApplicationBridge {
     private let application: SBApplication?
 
@@ -82,6 +101,71 @@ final class MailApplicationBridge {
         return MailBridgeResult(output: "Moved \(moved) message\(moved == 1 ? "" : "s") to \(location.displayPath).", error: nil)
     }
 
+    func openMessage(libraryID: Int) -> Bool {
+        guard let message = messageObject(libraryID: libraryID) else {
+            return false
+        }
+        let selector = NSSelectorFromString("open")
+        guard message.responds(to: selector) else {
+            return false
+        }
+        _ = message.perform(selector)
+        application?.activate()
+        return (message as? SBObject)?.lastError() == nil
+    }
+
+    func logicalMessages(for context: MailMessageContext, limit: Int) -> [MailLogicalMessageRecord] {
+        guard limit > 0 else {
+            return []
+        }
+
+        let queryTerms = Set(
+            SubjectTokenizer.terms(from: context.subject, limit: 12)
+                + SubjectTokenizer.terms(from: context.bodyPreview, limit: 12)
+        )
+        let matchingMailboxes = logicalMailboxCandidates(terms: queryTerms).prefix(3)
+        var records: [MailLogicalMessageRecord] = []
+
+        for candidate in matchingMailboxes {
+            guard let messages = candidate.mailbox.value(forKey: "messages") as? SBElementArray,
+                  messages.count > 0,
+                  messages.count <= 5_000,
+                  let subjects = messages.value(forKey: "subject") as? [String],
+                  let senders = messages.value(forKey: "sender") as? [String],
+                  let identifiers = messages.value(forKey: "id") as? [Any],
+                  let dates = messages.value(forKey: "dateReceived") as? [Any] else {
+                continue
+            }
+
+            let count = min(subjects.count, senders.count, identifiers.count, dates.count)
+            for index in 0..<count {
+                guard let libraryID = integerValue(identifiers[index]) else {
+                    continue
+                }
+                records.append(MailLogicalMessageRecord(
+                    libraryID: libraryID,
+                    subject: subjects[index],
+                    sender: senders[index],
+                    date: dates[index] as? Date,
+                    mailboxPath: candidate.path,
+                    accountName: candidate.accountName
+                ))
+            }
+        }
+
+        return records
+            .map { ($0, logicalMessageScore($0, context: context, terms: queryTerms)) }
+            .filter { $0.1 > 0 }
+            .sorted { lhs, rhs in
+                if lhs.1 == rhs.1 {
+                    return (lhs.0.date ?? .distantPast) > (rhs.0.date ?? .distantPast)
+                }
+                return lhs.1 > rhs.1
+            }
+            .prefix(limit)
+            .map(\.0)
+    }
+
     private func selectedMessages() -> [NSObject] {
         guard let selection = application?.value(forKey: "selection") else {
             return []
@@ -93,6 +177,95 @@ final class MailApplicationBridge {
             return array.compactMap { $0 as? NSObject }
         }
         return []
+    }
+
+    private func logicalMailboxCandidates(terms: Set<String>) -> [LogicalMailboxCandidate] {
+        var candidates: [LogicalMailboxCandidate] = []
+        for account in objectCollection(application, key: "accounts") {
+            let accountName = stringValue(account, key: "name")
+            for mailbox in objectCollection(account, key: "mailboxes") {
+                let name = stringValue(mailbox, key: "name")
+                let normalizedName = name.lowercased()
+                let score = terms.reduce(0) { total, term in
+                    let normalizedTerm = term.lowercased()
+                    guard normalizedTerm.count >= 4 else {
+                        return total
+                    }
+                    if normalizedName == normalizedTerm {
+                        return total + 80
+                    }
+                    if normalizedName.contains(normalizedTerm) || normalizedTerm.contains(normalizedName) {
+                        return total + 50
+                    }
+                    return total
+                }
+                guard score > 0 else {
+                    continue
+                }
+                candidates.append(LogicalMailboxCandidate(
+                    mailbox: mailbox,
+                    path: [name],
+                    accountName: accountName.isEmpty ? nil : accountName,
+                    score: score
+                ))
+            }
+        }
+        return candidates.sorted { lhs, rhs in
+            if lhs.score == rhs.score {
+                return lhs.path.joined(separator: " / ") < rhs.path.joined(separator: " / ")
+            }
+            return lhs.score > rhs.score
+        }
+    }
+
+    private func logicalMessageScore(
+        _ record: MailLogicalMessageRecord,
+        context: MailMessageContext,
+        terms: Set<String>
+    ) -> Int {
+        let contextSender = normalizedEmail(context.senderEmail ?? context.sender)
+        let recordSender = normalizedEmail(record.sender)
+        let subject = record.subject.lowercased()
+        var score = contextSender.isEmpty || contextSender != recordSender ? 0 : 320
+
+        let contextSubjectTerms = Set(SubjectTokenizer.terms(from: context.subject, limit: 12))
+        let recordSubjectTerms = Set(SubjectTokenizer.terms(from: record.subject, limit: 12))
+        score += contextSubjectTerms.intersection(recordSubjectTerms).count * 24
+        for term in terms where term.count >= 4 && subject.contains(term.lowercased()) {
+            score += 12
+        }
+        if let date = record.date {
+            let ageInDays = max(0, Date().timeIntervalSince(date) / (24 * 60 * 60))
+            score += max(0, 90 - min(90, Int(ageInDays)))
+        }
+        return score
+    }
+
+    private func messageObject(libraryID: Int) -> NSObject? {
+        for account in objectCollection(application, key: "accounts") {
+            guard let mailbox = objectCollection(account, key: "mailboxes").first,
+                  let messages = mailbox.value(forKey: "messages") as? SBElementArray else {
+                continue
+            }
+            return messages.object(withID: libraryID) as? NSObject
+        }
+        return nil
+    }
+
+    private func integerValue(_ value: Any) -> Int? {
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        if let value = value as? Int {
+            return value
+        }
+        return nil
+    }
+
+    private func normalizedEmail(_ value: String) -> String {
+        (EmailAddress.first(in: value) ?? value)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
     }
 
     private func findMailbox(path: [String], accountHint: String?) -> NSObject? {
@@ -193,4 +366,11 @@ final class MailApplicationBridge {
         }
         return value
     }
+}
+
+private struct LogicalMailboxCandidate {
+    var mailbox: NSObject
+    var path: [String]
+    var accountName: String?
+    var score: Int
 }

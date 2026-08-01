@@ -108,6 +108,12 @@ struct ContentView: View {
     private var actionsPane: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
+                if monitor.isSearchingMessages {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.7)
+                        .frame(width: 16, height: 16)
+                }
                 Text("Actions")
                     .font(fonts.headline)
                 Spacer()
@@ -290,6 +296,13 @@ struct ContentView: View {
     }
 
     private func openSimilarMessage(_ message: SimilarMessage) {
+        if let url = URL(string: message.path),
+           url.scheme == "shelf-mail-message",
+           let libraryID = Int(url.host ?? ""),
+           MailApplicationBridge().openMessage(libraryID: libraryID) {
+            return
+        }
+
         let messageURL = URL(fileURLWithPath: message.path)
         let mailURL = URL(fileURLWithPath: "/System/Applications/Mail.app")
         let configuration = NSWorkspace.OpenConfiguration()
