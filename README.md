@@ -1,3 +1,7 @@
+# Shelf
+
+<img src="docs/icon_256.png" width="256" height="256" alt="Shelf app icon">
+
 Shelf is being migrated from the original Python/PyObjC app to a native Swift macOS app.
 
 The Swift version watches the frontmost app, extracts context hints from supported apps, matches those hints against Contacts, and offers automation actions for the current app/contact pair.
