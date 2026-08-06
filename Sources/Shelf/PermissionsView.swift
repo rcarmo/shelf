@@ -43,7 +43,9 @@ struct PermissionsView: View {
                 monitor.requestAccessibilityAccess()
             }
 
-            FullDiskAccessControl(needsAccess: monitor.mailNeedsFullDiskAccess)
+            FullDiskAccessControl(
+                needsAccess: monitor.mailNeedsFullDiskAccess || monitor.safariNeedsFullDiskAccess
+            )
         }
         .onChange(of: contentBaseFontSize) { newValue in
             contentBaseFontSize = ShelfSettings.clampedContentBaseFontSize(newValue)
@@ -72,7 +74,7 @@ private struct FullDiskAccessControl: View {
                     .font(.caption.weight(.medium))
                     .foregroundStyle(statusColor)
             }
-            Text("Needed for local Mail header reads when Mail messages are not available through Spotlight.")
+            Text("Needed for local Mail headers and Safari Reading List and history lookup.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Button(action: openFullDiskAccessSettings) {

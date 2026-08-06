@@ -76,7 +76,15 @@ struct ContentView: View {
                 .frame(height: 118, alignment: .top)
                 .clipped()
 
-                if !monitor.similarMessages.isEmpty || !monitor.messageLocations.isEmpty {
+                if hint.bundleIdentifier == "com.apple.Safari",
+                   monitor.isResolvingSafariContext || monitor.safariContext != nil {
+                    ScrollView {
+                        safariContextSection
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .layoutPriority(1)
+                } else if !monitor.similarMessages.isEmpty || !monitor.messageLocations.isEmpty {
                     ScrollView {
                         mailIntelligenceSection
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -98,7 +106,7 @@ struct ContentView: View {
                 )
             }
 
-            if monitor.similarMessages.isEmpty && monitor.messageLocations.isEmpty {
+            if monitor.similarMessages.isEmpty && monitor.messageLocations.isEmpty && monitor.safariContext == nil {
                 Spacer()
             }
         }
@@ -157,7 +165,7 @@ struct ContentView: View {
 
     private var statusBar: some View {
         HStack(spacing: 8) {
-            if monitor.isSearchingMessages {
+            if monitor.isSearchingMessages || monitor.isResolvingSafariContext {
                 ProgressView()
                     .controlSize(.small)
                     .scaleEffect(0.65)
@@ -295,6 +303,115 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    @ViewBuilder
+    private var safariContextSection: some View {
+        if let context = monitor.safariContext {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 6) {
+                    Text("Safari Context")
+                        .font(fonts.caption)
+                        .foregroundStyle(.secondary)
+                    if monitor.isResolvingSafariContext {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.6)
+                            .frame(width: 14, height: 14)
+                    }
+                }
+
+                safariReadingListRow(context.readingListState)
+                safariHistoryRow(context)
+
+                if !context.relatedPages.isEmpty {
+                    Text("Related Pages")
+                        .font(fonts.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+
+                    ForEach(context.relatedPages) { page in
+                        Button {
+                            NSWorkspace.shared.open(page.url)
+                        } label: {
+                            SafariRelatedPageRow(page: page)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open in Safari")
+                    }
+                } else if !monitor.isResolvingSafariContext {
+                    Text(context.diagnostic)
+                        .font(fonts.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func safariReadingListRow(_ state: SafariReadingListState) -> some View {
+        let content: (image: String, title: String, detail: String) = switch state {
+        case .checking:
+            ("bookmark", "Reading List", "Checking membership")
+        case .included:
+            ("bookmark.fill", "In Reading List", "This page is already saved")
+        case .notIncluded:
+            ("bookmark", "Not in Reading List", "No matching saved URL")
+        case .unavailable:
+            ("exclamationmark.triangle", "Reading List unavailable", "Full Disk Access may be required")
+        }
+
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: content.image)
+                .font(fonts.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(content.title)
+                    .font(fonts.captionMedium)
+                Text(content.detail)
+                    .font(fonts.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func safariHistoryRow(_ context: SafariContextSnapshot) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(fonts.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                if context.previousVisitCount > 0 {
+                    Text("Previously visited \(context.previousVisitCount) time\(context.previousVisitCount == 1 ? "" : "s")")
+                        .font(fonts.captionMedium)
+                    if let date = context.previousVisit {
+                        HStack(spacing: 3) {
+                            Text("Most recently")
+                            Text(date, style: .relative)
+                        }
+                    }
+                } else if context.historyAvailable {
+                    Text("No previous visit found")
+                        .font(fonts.captionMedium)
+                    Text("The current navigation is not counted")
+                } else if monitor.isResolvingSafariContext {
+                    Text("Checking history")
+                        .font(fonts.captionMedium)
+                    Text("Searching across Safari profiles")
+                } else {
+                    Text("History unavailable")
+                        .font(fonts.captionMedium)
+                    Text("Full Disk Access may be required")
+                }
+            }
+            .font(fonts.caption2)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private func openSimilarMessage(_ message: SimilarMessage) {
         if let url = URL(string: message.path),
            url.scheme == "shelf-mail-message",
@@ -386,6 +503,50 @@ private struct SimilarMessageRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct SafariRelatedPageRow: View {
+    @Environment(\.contentBaseFontSize) private var contentBaseFontSize
+    var page: SafariRelatedPage
+
+    private var fonts: ContentFontScale {
+        ContentFontScale(baseSize: contentBaseFontSize)
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: page.isInReadingList ? "bookmark.fill" : "safari")
+                .font(fonts.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(page.title)
+                    .font(fonts.captionMedium)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                Text(page.url.host ?? page.url.absoluteString)
+                    .font(fonts.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    if page.isInReadingList {
+                        Text("Reading List")
+                    }
+                    if page.isInReadingList, page.lastVisited != nil {
+                        Text("-")
+                    }
+                    if let date = page.lastVisited {
+                        Text(date, style: .relative)
+                    }
+                }
+                .font(fonts.caption2)
+                .foregroundStyle(.tertiary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 

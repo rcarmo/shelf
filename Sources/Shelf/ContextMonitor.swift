@@ -11,11 +11,14 @@ final class ContextMonitor: ObservableObject {
     @Published var similarMessages: [SimilarMessage] = []
     @Published var similarMessagesSummary = ""
     @Published var mailSuggestionStatus = ""
+    @Published var safariContext: SafariContextSnapshot?
     @Published var actions: [AppAutomationAction] = []
     @Published var lastResult: AutomationResult?
     @Published var isSearchingMessages = false
     @Published var isSummarizingSimilarMessages = false
+    @Published var isResolvingSafariContext = false
     @Published var mailNeedsFullDiskAccess = false
+    @Published var safariNeedsFullDiskAccess = false
     @Published var contactsPermission: PermissionState = .unknown
     @Published var accessibilityPermission: PermissionState = .unknown
     @Published var statusText = "Starting"
@@ -23,10 +26,12 @@ final class ContextMonitor: ObservableObject {
     private let resolver = ContactResolver()
     private let extractors = ContextExtractorRegistry()
     private let messageRanker = SpotlightMessageRanker()
+    private let safariResolver = SafariContextResolver()
     private let intelligenceAssistant = IntelligenceAssistant()
     let automation = AutomationRunner()
     private var timer: Timer?
     private var locationSearchTask: Task<Void, Never>?
+    private var safariResolutionTask: Task<Void, Never>?
     private var similarMessagesSummaryTask: Task<Void, Never>?
     private var resultClearTask: Task<Void, Never>?
     private var lastExternalApplication: NSRunningApplication?
@@ -104,6 +109,7 @@ final class ContextMonitor: ObservableObject {
             resetSimilarMessagesSummary()
             mailSuggestionStatus = ""
             mailNeedsFullDiskAccess = false
+            resetSafariContext()
             isSearchingMessages = false
             locationSearchTask?.cancel()
             refreshActions()
@@ -126,6 +132,7 @@ final class ContextMonitor: ObservableObject {
             }
             refreshActions()
             refreshMessageLocations(for: hint)
+            refreshSafariContext(for: hint)
         }
     }
 
@@ -228,6 +235,45 @@ final class ContextMonitor: ObservableObject {
                         return
                     }
                     self.applySuggestionUpdate(update, hint: hint, mailContext: mailContext, signature: signature)
+                }
+            }
+        }
+    }
+
+    private func refreshSafariContext(for hint: AppHint) {
+        safariResolutionTask?.cancel()
+        guard hint.bundleIdentifier == "com.apple.Safari",
+              let url = hint.url else {
+            resetSafariContext()
+            return
+        }
+
+        let signature = hint.signature
+        safariContext = SafariContextSnapshot()
+        safariNeedsFullDiskAccess = false
+        isResolvingSafariContext = true
+        statusText = "Checking Safari context"
+
+        safariResolutionTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            for await update in safariResolver.updates(
+                for: url,
+                title: hint.title,
+                observedAt: hint.createdAt
+            ) {
+                guard !Task.isCancelled else {
+                    return
+                }
+                await MainActor.run {
+                    guard self.currentHint?.signature == signature else {
+                        return
+                    }
+                    self.safariContext = update.snapshot
+                    self.safariNeedsFullDiskAccess = update.snapshot.requiresFullDiskAccess
+                    self.isResolvingSafariContext = !update.isFinal
+                    self.statusText = update.snapshot.diagnostic
                 }
             }
         }
@@ -401,6 +447,13 @@ final class ContextMonitor: ObservableObject {
         similarMessagesSummaryTask?.cancel()
         similarMessagesSummary = ""
         isSummarizingSimilarMessages = false
+    }
+
+    private func resetSafariContext() {
+        safariResolutionTask?.cancel()
+        safariContext = nil
+        safariNeedsFullDiskAccess = false
+        isResolvingSafariContext = false
     }
 }
 

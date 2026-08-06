@@ -28,8 +28,14 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("LatentSemanticMapping"),
-                .linkedFramework("ScriptingBridge")
+                .linkedFramework("ScriptingBridge"),
+                .linkedLibrary("sqlite3")
             ]
+        ),
+        .testTarget(
+            name: "ShelfTests",
+            dependencies: ["Shelf"],
+            path: "Tests/ShelfTests"
         )
     ]
 )

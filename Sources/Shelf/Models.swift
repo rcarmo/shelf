@@ -167,6 +167,38 @@ struct MailSuggestionUpdate: Equatable {
     var isFinal: Bool
 }
 
+enum SafariReadingListState: Equatable {
+    case checking
+    case included
+    case notIncluded
+    case unavailable
+}
+
+struct SafariRelatedPage: Identifiable, Equatable {
+    var id: String
+    var title: String
+    var url: URL
+    var lastVisited: Date?
+    var visitCount: Int
+    var isInReadingList: Bool
+    var score: Double
+}
+
+struct SafariContextSnapshot: Equatable {
+    var readingListState: SafariReadingListState = .checking
+    var previousVisit: Date?
+    var previousVisitCount = 0
+    var historyAvailable = false
+    var relatedPages: [SafariRelatedPage] = []
+    var diagnostic = ""
+    var requiresFullDiskAccess = false
+}
+
+struct SafariContextUpdate: Equatable {
+    var snapshot: SafariContextSnapshot
+    var isFinal: Bool
+}
+
 struct AutomationResult: Identifiable {
     let id = UUID()
     var title: String
