@@ -5,10 +5,11 @@ import Foundation
 final class AutomationRunner {
     private let appleScript = AppleScriptRunner()
     private let mailActions: any MailActionServicing
+    private let mailDrafts = MailDraftService()
     private var bindingSelection: String?
     private var destinationTasks: [MailDestinationKey: Task<MailDestinationIdentity?, Never>] = [:]
 
-    init(mailActions: any MailActionServicing = MailActionService()) {
+    init(mailActions: any MailActionServicing = MailActionService.shared) {
         self.mailActions = mailActions
     }
 
@@ -33,6 +34,23 @@ final class AutomationRunner {
 
         if let hint, hint.bundleIdentifier == "com.apple.mail" {
             actions.append(contentsOf: messageLocations.map { moveSelectedMailAction(to: $0, mailContext: mailContext) })
+            if let context = mailContext ?? hint.mailContext {
+                actions.append(contentsOf: MailMessageActions.hints(for: context).map { descriptor in
+                    AppAutomationAction(title: descriptor.title, detail: descriptor.detail, systemImage: descriptor.symbol) {
+                        switch descriptor.operation {
+                        case .draft(let kind, let selection):
+                            return self.result(title: descriptor.title, scriptResult: await self.mailDrafts.open(kind, selection: selection))
+                        case .copy(let text):
+                            NSPasteboard.general.clearContents()
+                            let copied = NSPasteboard.general.setString(text, forType: .string)
+                            return AutomationResult(title: descriptor.title, message: copied ? "Copied" : "Could not copy", isError: !copied)
+                        case .open(let url):
+                            let opened = NSWorkspace.shared.open(url)
+                            return AutomationResult(title: descriptor.title, message: opened ? "Opened" : "Could not open link", isError: !opened)
+                        }
+                    }
+                })
+            }
         }
 
         if let context = hint?.slackContext {
@@ -212,7 +230,7 @@ final class AutomationRunner {
             : ""
         return AppAutomationAction(
             title: "Move to \(location.mailboxName)",
-            detail: "\(location.hitCount) similar message\(location.hitCount == 1 ? "" : "s")\(semanticDetail) in \(location.displayPath)",
+            detail: "\(location.qualifiedDisplayPath)\n\(location.evidenceSummary)\(semanticDetail)",
             systemImage: "tray.and.arrow.down"
         ) {
             let identity = await destination.value

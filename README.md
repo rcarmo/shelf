@@ -17,6 +17,10 @@ Supported hint sources:
 
 Supported automation actions include opening Contacts records, composing Mail messages, opening Messages, navigating the current browser tab to a contact URL, moving selected Mail messages to suggested folders, revealing Finder selections, copying contact summaries, and returning focus to the hinted app.
 
+Mail messages also offer reply/reply-all/forward drafts for a single bound message,
+copying sender/message details, and opening up to three links from the message preview,
+without requiring a Contacts match. Draft actions revalidate the selection and never send.
+
 Slack adds open/copy actions for conversation and explicitly focused message links.
 Drafts are excluded and Slack display names are not treated as Contacts identities.
 See [Slack context coverage and limits](docs/slack-context.md).
@@ -27,6 +31,11 @@ Build the native app:
 make native-app
 open dist/Shelf.app
 ```
+
+Local app builds use ad-hoc signing, with no Keychain certificate dependency.
+Privacy permissions may need to be granted again after rebuilding. To use a
+certificate explicitly, set `SHELF_CODESIGN_IDENTITY` to its identity or fingerprint;
+certificate signing alone does not establish Gatekeeper acceptance or notarization.
 
 For development:
 

@@ -72,18 +72,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 PLIST
 
 if command -v codesign >/dev/null 2>&1; then
-    SIGN_IDENTITY="${SHELF_CODESIGN_IDENTITY:-}"
-    if [[ -z "$SIGN_IDENTITY" ]] && command -v security >/dev/null 2>&1; then
-        SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/"/ { print $2; exit }')"
-    fi
-
-    if [[ -n "$SIGN_IDENTITY" ]]; then
-        codesign --force --sign "$SIGN_IDENTITY" "$APP_DIR"
-    else
-        echo "No code-signing identity is available. Set SHELF_CODESIGN_IDENTITY to your development identity." >&2
-        echo "For an explicitly disposable build, use SHELF_CODESIGN_IDENTITY=- (privacy grants may not survive rebuilds)." >&2
-        exit 1
-    fi
+    # Local builds must not silently select a stale or revoked Keychain identity.
+    SIGN_IDENTITY="${SHELF_CODESIGN_IDENTITY:--}"
+    codesign --force --sign "$SIGN_IDENTITY" "$APP_DIR"
     codesign --verify --deep --strict "$APP_DIR"
 fi
 

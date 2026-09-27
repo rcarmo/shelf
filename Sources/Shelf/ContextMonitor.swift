@@ -259,20 +259,6 @@ final class ContextMonitor: ObservableObject {
             guard let self else {
                 return
             }
-            let quickMessages = await messageRanker.quickSimilarMessages(for: mailContext)
-            guard !Task.isCancelled else {
-                return
-            }
-            if !quickMessages.isEmpty {
-                await MainActor.run {
-                    guard self.currentHint?.signature == signature else {
-                        return
-                    }
-                    self.similarMessages = quickMessages
-                    self.statusText = "Refining similar messages"
-                }
-            }
-
             for await update in messageRanker.suggestionUpdates(for: mailContext) {
                 guard !Task.isCancelled else {
                     return
@@ -334,9 +320,8 @@ final class ContextMonitor: ObservableObject {
     ) {
         let suggestions = update.suggestions
         messageLocations = suggestions.locations
-        if !suggestions.messages.isEmpty || update.isFinal {
-            similarMessages = suggestions.messages
-        }
+        // Messages and destinations are one snapshot, including the initial cache result.
+        similarMessages = suggestions.messages
         mailSuggestionStatus = suggestions.diagnostic
         mailNeedsFullDiskAccess = suggestions.requiresFullDiskAccess
         isSearchingMessages = !update.isFinal

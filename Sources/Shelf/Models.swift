@@ -84,7 +84,7 @@ struct MailMessageIdentity: Codable, Equatable, Sendable {
     let accountID: String
 }
 
-struct MailDestinationIdentity: Equatable, Sendable {
+struct MailDestinationIdentity: Hashable, Sendable {
     let accountID: String
     let path: [String]
 }
@@ -150,7 +150,7 @@ struct MailMessageContext: Equatable, Sendable {
 }
 
 struct RankedMessageLocation: Identifiable, Equatable, Sendable {
-    var id: String { displayPath }
+    var id: String { ([accountHint ?? ""] + mailboxPath).joined(separator: "\u{1F}") }
     var mailboxPath: [String]
     var accountHint: String?
     var score: Double
@@ -158,6 +158,16 @@ struct RankedMessageLocation: Identifiable, Equatable, Sendable {
     var hitCount: Int
     var recentHitCount: Int = 0
     var samplePath: String
+    var senderHitCount: Int = 0
+    var threadHitCount: Int = 0
+    var accountDisplayName: String? = nil
+
+    var evidenceSummary: String {
+        if threadHitCount > 0 { return "\(threadHitCount) message\(threadHitCount == 1 ? "" : "s") in this thread" }
+        if senderHitCount > 0 { return "\(senderHitCount) filed message\(senderHitCount == 1 ? "" : "s") from this sender" }
+        return hitCount == 0 ? "Folder name matches message topic"
+            : "\(hitCount) similar message\(hitCount == 1 ? "" : "s")"
+    }
 
     var mailboxName: String {
         mailboxPath.last ?? displayPath
@@ -165,6 +175,10 @@ struct RankedMessageLocation: Identifiable, Equatable, Sendable {
 
     var displayPath: String {
         mailboxPath.isEmpty ? samplePath : mailboxPath.joined(separator: " / ")
+    }
+
+    var qualifiedDisplayPath: String {
+        (accountDisplayName ?? accountHint).map { "\($0) / \(displayPath)" } ?? displayPath
     }
 }
 
@@ -176,6 +190,7 @@ struct SimilarMessage: Identifiable, Equatable {
     var mailboxPath: [String]
     var path: String
     var rank: Int
+    var accountHint: String? = nil
 
     var mailboxName: String {
         mailboxPath.last ?? "Mail"

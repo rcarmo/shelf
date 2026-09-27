@@ -43,6 +43,7 @@ protocol MailActionServicing: Sendable {
 
 /// Synchronous Apple Events must never execute on the UI actor.
 actor MailActionService: MailActionServicing {
+    static let shared = MailActionService()
     private let bridge = MailApplicationBridge()
     private var destinations = MailDestinationCache()
 
@@ -53,7 +54,31 @@ actor MailActionService: MailActionServicing {
         let destination = bridge.destinationIdentity(for: location)
         guard !Task.isCancelled else { return nil }
         destinations.insert(destination, for: key)
+        if let destination {
+            var resolved = location
+            resolved.accountHint = destination.accountID
+            resolved.mailboxPath = destination.path
+            destinations.insert(destination, for: MailDestinationKey(resolved))
+        }
         return destination
+    }
+
+    func resolve(_ locations: [RankedMessageLocation]) -> [MailDestinationKey: MailDestinationIdentity] {
+        let deadline = Date().addingTimeInterval(2)
+        var resolved: [MailDestinationKey: MailDestinationIdentity] = [:]
+        var reads = 0
+        for location in locations.prefix(40) {
+            guard !Task.isCancelled else { break }
+            let key = MailDestinationKey(location)
+            if let cached = destinations.lookup(key) {
+                if let identity = cached.identity { resolved[key] = identity }
+                continue
+            }
+            guard reads < 16, Date() < deadline else { continue }
+            reads += 1
+            if let identity = destinationIdentity(for: location) { resolved[key] = identity }
+        }
+        return resolved
     }
 
     func move(to location: RankedMessageLocation, selection: [MailMessageIdentity], destination: MailDestinationIdentity?) -> MailBridgeResult {

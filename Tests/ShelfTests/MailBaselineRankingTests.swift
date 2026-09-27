@@ -2,6 +2,31 @@ import XCTest
 @testable import Shelf
 
 final class MailBaselineRankingTests: XCTestCase {
+    func testTopicFolderFallbackFillsSlotsWithoutPretendingToBeFiledMessages() {
+        let context = MailMessageContext(sender: "alice@example.org", subject: "Atlas deployment review", currentMailbox: "Inbox", bodyPreview: "")
+        let backed = MessageCandidate(path: "filed", rank: 1, supportsMailFiling: true, contributesSimilarMessage: true,
+                                      mailboxInfo: .init(mailboxPath: ["Engineering"], accountHint: "Work"),
+                                      header: .init(subject: context.subject, sender: context.sender, date: nil), bodyPreview: "")
+        let catalogs = ["Reviews", "Atlas", "Unrelated", "Projects"].enumerated().map { index, name in
+            MessageCandidate(path: "catalog\(index)", rank: index + 2, supportsMailFiling: true, contributesSimilarMessage: false,
+                             mailboxInfo: .init(mailboxPath: [name], accountHint: "Work"),
+                             header: .init(subject: name, sender: nil, date: nil), bodyPreview: "")
+        }
+        let ranker = SpotlightMessageRanker()
+        let folders = ranker.groupedLocations(from: [backed] + catalogs, currentMailbox: "Inbox", context: context)
+        XCTAssertEqual(folders.first?.mailboxName, "Engineering")
+        XCTAssertEqual(Set(folders.dropFirst().map(\.mailboxName)), ["Reviews", "Atlas"])
+        XCTAssertTrue(folders.dropFirst().allSatisfy { $0.hitCount == 0 && $0.evidenceSummary.contains("Folder name") })
+        let weakMessage = SimilarMessage(subject: "Review", sender: "someone@example.net", date: nil,
+                                         mailboxPath: ["Reviews"], path: "weak", rank: 1)
+        XCTAssertEqual(ranker.folderOrders(rankedLocations: folders, messages: [weakMessage], candidates: []).displayed.first?.mailboxName,
+                       "Engineering")
+        let fallbackOnly = ranker.groupedLocations(from: catalogs, currentMailbox: "Inbox", context: context)
+        XCTAssertEqual(Set(fallbackOnly.map(\.mailboxName)), ["Reviews", "Atlas"])
+        XCTAssertFalse(SpotlightMessageRanker.mailboxNameMatchesTopic(["Projects", "Unrelated"], subject: "Projects Atlas"))
+        XCTAssertFalse(SpotlightMessageRanker.mailboxNameMatchesTopic(["Art"], subject: "Quarterly report"))
+    }
+
     func testSingleMatchingMessagePromotesItsFolderBeforeTopFiveCut() {
         let ranker = SpotlightMessageRanker()
         let folders = (0..<10).map { index in
@@ -23,7 +48,7 @@ final class MailBaselineRankingTests: XCTestCase {
         XCTAssertEqual(full.first?.samplePath, folders[7].samplePath)
     }
 
-    func testFilingUsesRealMatchesNotGenericHitsOrTransientMailboxes() {
+    func testVisibleWeakMatchesKeepDestinationsBelowStrongEvidenceAndExcludeTransientMailboxes() {
         let context = MailMessageContext(sender: "alice@example.com", senderEmail: "alice@example.com",
                                          subject: "Follow-up Atlas Helios appliance", currentMailbox: "Inbox", bodyPreview: "Standard footer")
         func candidate(_ path: String, folder: String, subject: String, sender: String) -> MessageCandidate {
@@ -39,9 +64,10 @@ final class MailBaselineRankingTests: XCTestCase {
         let ranker = SpotlightMessageRanker()
         let candidates = unrelated + drafts + [good]
         let folders = ranker.groupedLocations(from: candidates, currentMailbox: context.currentMailbox, context: context)
-        XCTAssertEqual(folders.map(\.displayPath), ["Reviews"])
+        // A weaker hit accepted by the visible message list must not lose its folder.
+        XCTAssertEqual(folders.map(\.displayPath), ["Reviews", "Unrelated"])
         let orders = ranker.folderOrders(rankedLocations: folders, messages: ranker.similarMessages(from: candidates, context: context), candidates: candidates)
-        XCTAssertEqual(orders.displayed.map(\.displayPath), ["Reviews"])
+        XCTAssertEqual(orders.displayed.map(\.displayPath), ["Reviews", "Unrelated"])
         XCTAssertEqual(orders.displayed.first?.hitCount, 1)
     }
 

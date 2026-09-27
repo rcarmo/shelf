@@ -294,11 +294,11 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                             .frame(width: 18)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(location.displayPath)
+                            Text(location.qualifiedDisplayPath)
                                 .font(fonts.captionMedium)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
-                            Text("\(location.hitCount) hit\(location.hitCount == 1 ? "" : "s")")
+                            Text(location.evidenceSummary)
                                 .font(fonts.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -462,7 +462,8 @@ private struct AutomationActionRow: View {
                 Text(action.detail)
                     .font(fonts.caption2)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             Image(systemName: "chevron.right")
@@ -472,6 +473,7 @@ private struct AutomationActionRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .contentShape(Rectangle())
+        .help("\(action.title)\n\(action.detail)")
     }
 }
 

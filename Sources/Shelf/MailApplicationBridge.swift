@@ -34,19 +34,35 @@ actor MailLogicalMessageSearch {
 
     private let bridge = MailApplicationBridge()
 
-    func messages(for context: MailMessageContext, limit: Int) -> [MailLogicalMessageRecord] {
-        bridge.logicalMessages(for: context, limit: limit)
+    func messages(for context: MailMessageContext, limit: Int) -> (records: [MailLogicalMessageRecord], diagnostic: String) {
+        let records = bridge.logicalMessages(for: context, limit: limit)
+        return (records, bridge.logicalDiagnostic)
     }
 }
 
 final class MailApplicationBridge {
     private let application: SBApplication?
     private var logicalCatalog: (date: Date, mailboxes: [LogicalMailboxCandidate])?
-    private var logicalHeaders: [String: (date: Date, records: [MailLogicalMessageRecord])] = [:]
+    private var logicalHeaders = MailLogicalHeaderCache()
+    private(set) var logicalDiagnostic = ""
 
     init() {
         application = SBApplication(bundleIdentifier: "com.apple.mail")
         application?.timeout = 120 // Apple Event ticks: bound an unresponsive Mail request to two seconds.
+    }
+
+    func accountDirectory() -> MailAccountDirectory? {
+        guard !Task.isCancelled,
+              let accounts = application?.value(forKey: "accounts") as? SBElementArray,
+              accounts.count <= 32,
+              let ids = accounts.value(forKey: "id") as? [String],
+              !Task.isCancelled,
+              let names = accounts.value(forKey: "name") as? [String],
+              ids.count == names.count, ids.count <= 32 else { return nil }
+        return MailAccountDirectory(accounts: zip(ids, names).compactMap { id, name in
+            guard !id.isEmpty, !name.isEmpty else { return nil }
+            return .init(id: id, name: name)
+        })
     }
 
     func selectedMessage() -> MailSelectionSnapshot? {
@@ -134,50 +150,48 @@ final class MailApplicationBridge {
                 + SubjectTokenizer.terms(from: context.bodyPreview, limit: 12)
         )
         let deadline = Date().addingTimeInterval(8)
-        let matchingMailboxes = logicalMailboxCandidates(terms: queryTerms, context: context).prefix(24)
-        var records: [MailLogicalMessageRecord] = []
-
+        let matchingMailboxes = logicalMailboxCandidates(terms: queryTerms, context: context)
+        var mailboxesByKey: [String: LogicalMailboxCandidate] = [:]
+        var keys: [String] = []
         for candidate in matchingMailboxes {
-            guard !Task.isCancelled, Date() < deadline else { break }
             let key = ([candidate.accountName ?? ""] + candidate.path).joined(separator: "\u{1F}")
-            if let cached = logicalHeaders[key], Date().timeIntervalSince(cached.date) < 60 {
-                records.append(contentsOf: cached.records)
-                continue
-            }
-            guard let messages = candidate.mailbox.value(forKey: "messages") as? SBElementArray,
-                  messages.count > 0,
-                  messages.count <= 5_000,
-                  let subjects = messages.value(forKey: "subject") as? [String],
-                  let senders = messages.value(forKey: "sender") as? [String],
-                  let identifiers = messages.value(forKey: "id") as? [Any],
-                  let dates = messages.value(forKey: "dateReceived") as? [Any] else {
-                continue
-            }
-
-            let count = min(subjects.count, senders.count, identifiers.count, dates.count)
-            var mailboxRecords: [MailLogicalMessageRecord] = []
-            for index in 0..<count {
-                guard let libraryID = integerValue(identifiers[index]) else {
-                    continue
-                }
-                mailboxRecords.append(MailLogicalMessageRecord(
-                    libraryID: libraryID,
-                    subject: subjects[index],
-                    sender: senders[index],
-                    date: dates[index] as? Date,
-                    mailboxPath: candidate.path,
-                    accountName: candidate.accountName
-                ))
-            }
-            records.append(contentsOf: mailboxRecords)
-            if logicalHeaders.count >= 24,
-               let oldest = logicalHeaders.min(by: { $0.value.date < $1.value.date })?.key {
-                logicalHeaders[oldest] = nil
-            }
-            logicalHeaders[key] = (Date(), mailboxRecords)
+            if mailboxesByKey[key] == nil { keys.append(key) }
+            mailboxesByKey[key] = candidate
         }
+        logicalHeaders.retain(keys: Set(keys))
+        let pool = keys.compactMap { key -> MailDestinationCandidate? in
+            guard let candidate = mailboxesByKey[key] else { return nil }
+            return .make(path: candidate.path, account: candidate.accountName,
+                         records: logicalHeaders.records[key] ?? [], context: context)
+        }
+        var random = SystemRandomNumberGenerator()
+        let sampled = MailDestinationCandidate.sample(pool, oldestFirst: logicalHeaders.pending(keys, now: Date()),
+                                                      limit: 24, using: &random)
+        var pagesRead = 0
+        var failures = 0
+        var errorCodes = Set<Int>()
+        for key in sampled {
+            guard !Task.isCancelled, Date() < deadline else { break }
+            guard let candidate = mailboxesByKey[key] else { continue }
+            let page = logicalHeaders.begin(key, now: Date())
+            guard let source = MailLogicalHeaderCache.script(path: candidate.path, account: candidate.accountName, page: page),
+                  let script = NSAppleScript(source: source) else { continue }
+            var error: NSDictionary?
+            let result = script.executeAndReturnError(&error)
+            guard error == nil,
+                  let decoded = MailLogicalHeaderCache.decode(result, path: candidate.path, account: candidate.accountName) else {
+                failures += 1
+                if let code = error?[NSAppleScript.errorNumber] as? Int { errorCodes.insert(code) }
+                continue
+            }
+            logicalHeaders.store(decoded.records, total: decoded.total, key: key, now: Date())
+            pagesRead += 1
+        }
+        logicalDiagnostic = "Mail destination pool: \(pool.filter(\.isDestination).count) folders; \(pagesRead) header pages read; \(logicalHeaders.records.count) folders cached."
+        if failures > 0 { logicalDiagnostic += " \(failures) Mail page read(s) unavailable." }
+        if !errorCodes.isEmpty { logicalDiagnostic += " Mail errors: \(errorCodes.sorted().map(String.init).joined(separator: ", "))." }
 
-        return records
+        let ranked = logicalHeaders.records.values.flatMap { $0 }
             .map { ($0, logicalMessageScore($0, context: context, terms: queryTerms)) }
             .filter { $0.1 > 0 }
             .sorted { lhs, rhs in
@@ -186,8 +200,11 @@ final class MailApplicationBridge {
                 }
                 return lhs.1 > rhs.1
             }
-            .prefix(limit)
             .map(\.0)
+        return MailFilingRetrieval.select(ranked, limit: limit) {
+            MailFilingRetrieval.folderKey(path: $0.mailboxPath, account: $0.accountName,
+                                         subject: $0.subject, sender: $0.sender, context: context)
+        }
     }
 
     private func selectedMessages() -> [NSObject] {
@@ -227,12 +244,13 @@ final class MailApplicationBridge {
             guard !Task.isCancelled else { return nil }
             let id = stringValue(account, key: "id")
             guard !id.isEmpty else { continue }
-            if let hint = location.accountHint, hint != id && hint != stringValue(account, key: "name") { continue }
+            if let hint = location.accountHint,
+               !MailAccountDirectory.sameID(hint, id) && hint != stringValue(account, key: "name") { continue }
             if let mailbox = namedMailbox(path: location.mailboxPath, container: account) {
                 matches.append((.init(accountID: id, path: location.mailboxPath), mailbox))
             }
         }
-        if location.accountHint == nil,
+        if location.accountHint == nil || location.accountHint == "local",
            let mailbox = namedMailbox(path: location.mailboxPath, container: application) {
             matches.append((.init(accountID: "local", path: location.mailboxPath), mailbox))
         }
@@ -261,7 +279,8 @@ final class MailApplicationBridge {
             .map { ($0, stringValue($0, key: "name")) }
             .sorted { ($0.1 == context.currentAccount ? 1 : 0) > ($1.1 == context.currentAccount ? 1 : 0) }
         let deadline = Date().addingTimeInterval(2)
-        for (account, accountName) in accounts {
+        let containers: [(NSObject, String)] = accounts + (application.map { [($0 as NSObject, "")] } ?? [])
+        for (account, accountName) in containers {
             guard !Task.isCancelled, Date() < deadline else { break }
             guard let mailboxes = account.value(forKey: "mailboxes") as? SBElementArray,
                   let names = mailboxes.value(forKey: "name") as? [String],
@@ -313,7 +332,8 @@ final class MailApplicationBridge {
         let name = path.joined(separator: " ").lowercased()
         let topic = min(200, terms.filter { $0.count >= 4 && name.contains($0.lowercased()) }.count * 50)
         return topic + (account != nil && account == context.currentAccount ? 500 : 0)
-            + (path.last == context.currentMailbox ? 250 : 0)
+            + (MailFilingRetrieval.folderKey(path: path, account: account, subject: context.subject,
+                                            sender: context.sender, context: context) != nil ? 250 : 0)
     }
 
     private func logicalMailboxPath(
