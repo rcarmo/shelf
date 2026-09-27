@@ -8,7 +8,7 @@ struct ShelfApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(monitor)
-                .frame(minWidth: 620, minHeight: 440)
+                .frame(minWidth: 500, minHeight: 320)
                 .task {
                     await monitor.start()
                 }

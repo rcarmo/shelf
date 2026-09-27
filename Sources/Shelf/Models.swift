@@ -9,6 +9,7 @@ enum HintKind: String, CaseIterable, Identifiable {
     case file = "File"
     case contact = "Contact"
     case window = "Window"
+    case conversation = "Conversation"
     case unknown = "Unknown"
 
     var id: String { rawValue }
@@ -28,6 +29,7 @@ struct AppHint: Identifiable, Equatable {
     var contactIdentifier: String?
     var mailContext: MailMessageContext?
     var confidence: Double
+    var slackContext: SlackContext? = nil
     var createdAt = Date()
 
     var signature: String {
@@ -36,7 +38,11 @@ struct AppHint: Identifiable, Equatable {
             kind.rawValue,
             value,
             title,
-            subtitle
+            subtitle,
+            mailContext?.selectionSignature ?? "",
+            mailContext?.bodyPreview ?? "",
+            mailContext?.recipients.joined(separator: "|") ?? "",
+            slackContext?.signature ?? ""
         ].joined(separator: "|")
     }
 }
@@ -73,7 +79,26 @@ struct ContactClue: Identifiable, Equatable {
     }
 }
 
-struct MailMessageContext: Equatable {
+struct MailMessageIdentity: Codable, Equatable, Sendable {
+    let libraryID: Int
+    let accountID: String
+}
+
+struct MailDestinationIdentity: Equatable, Sendable {
+    let accountID: String
+    let path: [String]
+}
+
+struct MailActionBinding: Equatable, Sendable {
+    let selection: [MailMessageIdentity]
+    let destination: MailDestinationIdentity?
+
+    func matches(selection current: [MailMessageIdentity]?, destination resolved: MailDestinationIdentity?) -> Bool {
+        !selection.isEmpty && current == selection && destination != nil && resolved == destination
+    }
+}
+
+struct MailMessageContext: Equatable, Sendable {
     var sender: String
     var senderEmail: String?
     var recipients: [String] = []
@@ -82,6 +107,14 @@ struct MailMessageContext: Equatable {
     var currentMailbox: String
     var currentAccount: String?
     var bodyPreview: String
+    var selection: [MailMessageIdentity] = []
+
+    var selectionSignature: String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: (try? encoder.encode(selection)) ?? Data(), as: UTF8.self)
+            + "|" + (currentAccount ?? "") + "|" + currentMailbox
+    }
 
     var searchTerms: [String] {
         var terms: [String] = []
@@ -116,7 +149,7 @@ struct MailMessageContext: Equatable {
     }
 }
 
-struct RankedMessageLocation: Identifiable, Equatable {
+struct RankedMessageLocation: Identifiable, Equatable, Sendable {
     var id: String { displayPath }
     var mailboxPath: [String]
     var accountHint: String?
@@ -158,6 +191,7 @@ struct MailSuggestions: Equatable {
     var messages: [SimilarMessage]
     var diagnostic: String
     var requiresFullDiskAccess: Bool
+    var decisionEvidence: [MailFolderEvidence] = []
 
     static let empty = MailSuggestions(locations: [], messages: [], diagnostic: "", requiresFullDiskAccess: false)
 }

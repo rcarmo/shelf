@@ -2,6 +2,7 @@ import Foundation
 import ScriptingBridge
 
 struct MailSelectionSnapshot {
+    var selection: [MailMessageIdentity]
     var sender: String
     var senderEmail: String?
     var recipients: [String]
@@ -40,13 +41,17 @@ actor MailLogicalMessageSearch {
 
 final class MailApplicationBridge {
     private let application: SBApplication?
+    private var logicalCatalog: (date: Date, mailboxes: [LogicalMailboxCandidate])?
+    private var logicalHeaders: [String: (date: Date, records: [MailLogicalMessageRecord])] = [:]
 
     init() {
         application = SBApplication(bundleIdentifier: "com.apple.mail")
+        application?.timeout = 120 // Apple Event ticks: bound an unresponsive Mail request to two seconds.
     }
 
     func selectedMessage() -> MailSelectionSnapshot? {
-        guard let message = selectedMessages().first else {
+        let selected = selectedMessages()
+        guard let message = selected.first else {
             return nil
         }
 
@@ -62,6 +67,7 @@ final class MailApplicationBridge {
             .flatMap { stringValue($0, key: "name") }
 
         return MailSelectionSnapshot(
+            selection: selectionIdentity(selected) ?? [],
             sender: sender,
             senderEmail: EmailAddress.first(in: sender),
             recipients: recipientAddresses(from: message),
@@ -73,14 +79,18 @@ final class MailApplicationBridge {
         )
     }
 
-    func moveSelectedMessages(to location: RankedMessageLocation) -> MailBridgeResult {
+    func moveSelectedMessages(to location: RankedMessageLocation, expectedSelection: [MailMessageIdentity],
+                              destination: MailDestinationIdentity?) -> MailBridgeResult {
         let messages = selectedMessages()
-        guard !messages.isEmpty else {
-            return MailBridgeResult(output: "", error: "No selected message.")
+        guard !expectedSelection.isEmpty, selectionIdentity(messages) == expectedSelection else {
+            return MailBridgeResult(output: "", error: "Mail selection changed. Refresh suggestions before moving.")
         }
-        guard let mailbox = findMailbox(path: location.mailboxPath, accountHint: location.accountHint) else {
-            return MailBridgeResult(output: "", error: "Mailbox path not found: \(location.displayPath)")
+        let binding = MailActionBinding(selection: expectedSelection, destination: destination)
+        guard let resolved = resolvedDestination(location),
+              binding.matches(selection: selectionIdentity(messages), destination: resolved.identity) else {
+            return MailBridgeResult(output: "", error: "Destination changed or is ambiguous. Refresh suggestions before moving.")
         }
+        let mailbox = resolved.mailbox
 
         let selector = NSSelectorFromString("moveTo:")
         var moved = 0
@@ -123,10 +133,17 @@ final class MailApplicationBridge {
             SubjectTokenizer.terms(from: context.subject, limit: 12)
                 + SubjectTokenizer.terms(from: context.bodyPreview, limit: 12)
         )
-        let matchingMailboxes = logicalMailboxCandidates(terms: queryTerms).prefix(3)
+        let deadline = Date().addingTimeInterval(8)
+        let matchingMailboxes = logicalMailboxCandidates(terms: queryTerms, context: context).prefix(24)
         var records: [MailLogicalMessageRecord] = []
 
         for candidate in matchingMailboxes {
+            guard !Task.isCancelled, Date() < deadline else { break }
+            let key = ([candidate.accountName ?? ""] + candidate.path).joined(separator: "\u{1F}")
+            if let cached = logicalHeaders[key], Date().timeIntervalSince(cached.date) < 60 {
+                records.append(contentsOf: cached.records)
+                continue
+            }
             guard let messages = candidate.mailbox.value(forKey: "messages") as? SBElementArray,
                   messages.count > 0,
                   messages.count <= 5_000,
@@ -138,11 +155,12 @@ final class MailApplicationBridge {
             }
 
             let count = min(subjects.count, senders.count, identifiers.count, dates.count)
+            var mailboxRecords: [MailLogicalMessageRecord] = []
             for index in 0..<count {
                 guard let libraryID = integerValue(identifiers[index]) else {
                     continue
                 }
-                records.append(MailLogicalMessageRecord(
+                mailboxRecords.append(MailLogicalMessageRecord(
                     libraryID: libraryID,
                     subject: subjects[index],
                     sender: senders[index],
@@ -151,6 +169,12 @@ final class MailApplicationBridge {
                     accountName: candidate.accountName
                 ))
             }
+            records.append(contentsOf: mailboxRecords)
+            if logicalHeaders.count >= 24,
+               let oldest = logicalHeaders.min(by: { $0.value.date < $1.value.date })?.key {
+                logicalHeaders[oldest] = nil
+            }
+            logicalHeaders[key] = (Date(), mailboxRecords)
         }
 
         return records
@@ -179,35 +203,76 @@ final class MailApplicationBridge {
         return []
     }
 
-    private func logicalMailboxCandidates(terms: Set<String>) -> [LogicalMailboxCandidate] {
+    private func selectionIdentity(_ messages: [NSObject]) -> [MailMessageIdentity]? {
+        var identities: [MailMessageIdentity] = []
+        for message in messages {
+            guard let rawID = message.value(forKey: "id"), let id = integerValue(rawID), id > 0 else { return nil }
+            let account = objectValue(message, key: "mailbox").flatMap { objectValue($0, key: "account") }
+            let accountID = account.map { stringValue($0, key: "id") } ?? "local"
+            guard !accountID.isEmpty else { return nil }
+            identities.append(.init(libraryID: id, accountID: accountID))
+        }
+        return identities.sorted { ($0.accountID, $0.libraryID) < ($1.accountID, $1.libraryID) }
+    }
+
+    func destinationIdentity(for location: RankedMessageLocation) -> MailDestinationIdentity? {
+        resolvedDestination(location)?.identity
+    }
+
+    private func resolvedDestination(_ location: RankedMessageLocation) -> (identity: MailDestinationIdentity, mailbox: NSObject)? {
+        let accounts = objectCollection(application, key: "accounts")
+        guard !location.mailboxPath.isEmpty, location.mailboxPath.count <= 32, accounts.count <= 32 else { return nil }
+        var matches: [(MailDestinationIdentity, NSObject)] = []
+        for account in accounts {
+            guard !Task.isCancelled else { return nil }
+            let id = stringValue(account, key: "id")
+            guard !id.isEmpty else { continue }
+            if let hint = location.accountHint, hint != id && hint != stringValue(account, key: "name") { continue }
+            if let mailbox = namedMailbox(path: location.mailboxPath, container: account) {
+                matches.append((.init(accountID: id, path: location.mailboxPath), mailbox))
+            }
+        }
+        if location.accountHint == nil,
+           let mailbox = namedMailbox(path: location.mailboxPath, container: application) {
+            matches.append((.init(accountID: "local", path: location.mailboxPath), mailbox))
+        }
+        guard matches.count == 1 else { return nil }
+        return (matches[0].0, matches[0].1)
+    }
+
+    private func namedMailbox(path: [String], container: NSObject?) -> NSObject? {
+        var current = container
+        for name in path {
+            guard !Task.isCancelled,
+                  let mailboxes = current?.value(forKey: "mailboxes") as? SBElementArray,
+                  let mailbox = mailboxes.object(withName: name) as? NSObject,
+                  stringValue(mailbox, key: "name") == name else { return nil }
+            current = mailbox
+        }
+        return current
+    }
+
+    private func logicalMailboxCandidates(terms: Set<String>, context: MailMessageContext) -> [LogicalMailboxCandidate] {
+        if let cached = logicalCatalog, Date().timeIntervalSince(cached.date) < 60 {
+            return prioritizeLogicalMailboxes(cached.mailboxes, terms: terms, context: context)
+        }
         var candidates: [LogicalMailboxCandidate] = []
-        for account in objectCollection(application, key: "accounts") {
-            let accountName = stringValue(account, key: "name")
+        let accounts = objectCollection(application, key: "accounts").prefix(32)
+            .map { ($0, stringValue($0, key: "name")) }
+            .sorted { ($0.1 == context.currentAccount ? 1 : 0) > ($1.1 == context.currentAccount ? 1 : 0) }
+        let deadline = Date().addingTimeInterval(2)
+        for (account, accountName) in accounts {
+            guard !Task.isCancelled, Date() < deadline else { break }
             guard let mailboxes = account.value(forKey: "mailboxes") as? SBElementArray,
                   let names = mailboxes.value(forKey: "name") as? [String],
                   let containers = mailboxes.value(forKey: "container") as? [Any] else {
                 continue
             }
-            let count = min(mailboxes.count, names.count, containers.count)
+            let count = min(mailboxes.count, names.count, containers.count, 512)
             for index in 0..<count {
                 let name = names[index]
-                let normalizedName = name.lowercased()
-                let score = terms.reduce(0) { total, term in
-                    let normalizedTerm = term.lowercased()
-                    guard normalizedTerm.count >= 4 else {
-                        return total
-                    }
-                    if normalizedName == normalizedTerm {
-                        return total + 80
-                    }
-                    if normalizedName.contains(normalizedTerm) || normalizedTerm.contains(normalizedName) {
-                        return total + 50
-                    }
-                    return total
-                }
-                guard score > 0 else {
-                    continue
-                }
+                guard !Task.isCancelled, Date() < deadline else { break }
+                guard !["trash", "junk", "spam", "deleted messages", "deleted items"].contains(name.lowercased()) else { continue }
                 guard let mailbox = mailboxes.object(at: index) as? NSObject else {
                     continue
                 }
@@ -220,9 +285,21 @@ final class MailApplicationBridge {
                         accountName: accountName
                     ),
                     accountName: accountName.isEmpty ? nil : accountName,
-                    score: score
+                    score: 0
                 ))
             }
+        }
+        logicalCatalog = (Date(), candidates)
+        return prioritizeLogicalMailboxes(candidates, terms: terms, context: context)
+    }
+
+    private func prioritizeLogicalMailboxes(_ mailboxes: [LogicalMailboxCandidate], terms: Set<String>,
+                                           context: MailMessageContext) -> [LogicalMailboxCandidate] {
+        let candidates = mailboxes.map { mailbox in
+            var mailbox = mailbox
+            mailbox.score = Self.logicalMailboxPriority(path: mailbox.path, account: mailbox.accountName,
+                                                        context: context, terms: terms)
+            return mailbox
         }
         return candidates.sorted { lhs, rhs in
             if lhs.score == rhs.score {
@@ -230,6 +307,13 @@ final class MailApplicationBridge {
             }
             return lhs.score > rhs.score
         }
+    }
+
+    static func logicalMailboxPriority(path: [String], account: String?, context: MailMessageContext, terms: Set<String>) -> Int {
+        let name = path.joined(separator: " ").lowercased()
+        let topic = min(200, terms.filter { $0.count >= 4 && name.contains($0.lowercased()) }.count * 50)
+        return topic + (account != nil && account == context.currentAccount ? 500 : 0)
+            + (path.last == context.currentMailbox ? 250 : 0)
     }
 
     private func logicalMailboxPath(
@@ -259,7 +343,7 @@ final class MailApplicationBridge {
         return path
     }
 
-    private func logicalMessageScore(
+    func logicalMessageScore(
         _ record: MailLogicalMessageRecord,
         context: MailMessageContext,
         terms: Set<String>
@@ -267,7 +351,10 @@ final class MailApplicationBridge {
         let contextSender = normalizedEmail(context.senderEmail ?? context.sender)
         let recordSender = normalizedEmail(record.sender)
         let subject = record.subject.lowercased()
-        var score = contextSender.isEmpty || contextSender != recordSender ? 0 : 320
+        let subjectMatch = MailSubjectMatch(context.subject, record.subject)
+        let sameSender = !contextSender.isEmpty && contextSender == recordSender
+        guard sameSender || subjectMatch.sharedTerms > 0 else { return 0 }
+        var score = (sameSender ? 140 : 0) + subjectMatch.retrievalBoost
 
         let contextSubjectTerms = Set(SubjectTokenizer.terms(from: context.subject, limit: 12))
         let recordSubjectTerms = Set(SubjectTokenizer.terms(from: record.subject, limit: 12))

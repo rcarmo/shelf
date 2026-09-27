@@ -4,7 +4,19 @@ import Foundation
 @MainActor
 final class AutomationRunner {
     private let appleScript = AppleScriptRunner()
-    private let mailBridge = MailApplicationBridge()
+    private let mailActions: any MailActionServicing
+    private var bindingSelection: String?
+    private var destinationTasks: [MailDestinationKey: Task<MailDestinationIdentity?, Never>] = [:]
+
+    init(mailActions: any MailActionServicing = MailActionService()) {
+        self.mailActions = mailActions
+    }
+
+    func invalidateMailBindings() {
+        for task in destinationTasks.values { task.cancel() }
+        destinationTasks.removeAll()
+        bindingSelection = nil
+    }
 
     func actions(
         for contact: ContactClue?,
@@ -14,8 +26,29 @@ final class AutomationRunner {
     ) -> [AppAutomationAction] {
         var actions: [AppAutomationAction] = []
 
+        if bindingSelection != mailContext?.selectionSignature {
+            invalidateMailBindings()
+            bindingSelection = mailContext?.selectionSignature
+        }
+
         if let hint, hint.bundleIdentifier == "com.apple.mail" {
             actions.append(contentsOf: messageLocations.map { moveSelectedMailAction(to: $0, mailContext: mailContext) })
+        }
+
+        if let context = hint?.slackContext {
+            actions.append(contentsOf: SlackActions.hints(for: context).map { descriptor in
+                AppAutomationAction(title: descriptor.title, detail: descriptor.detail, systemImage: descriptor.symbol) {
+                    switch descriptor.operation {
+                    case .open(let url):
+                        let opened = NSWorkspace.shared.open(url)
+                        return AutomationResult(title: descriptor.title, message: opened ? "Opened" : "Could not open link", isError: !opened)
+                    case .copy(let text):
+                        NSPasteboard.general.clearContents()
+                        let copied = NSPasteboard.general.setString(text, forType: .string)
+                        return AutomationResult(title: descriptor.title, message: copied ? "Copied" : "Could not copy", isError: !copied)
+                    }
+                }
+            })
         }
 
         if let contact {
@@ -161,6 +194,19 @@ final class AutomationRunner {
     }
 
     private func moveSelectedMailAction(to location: RankedMessageLocation, mailContext: MailMessageContext?) -> AppAutomationAction {
+        let selection = mailContext?.selection ?? []
+        let key = MailDestinationKey(location)
+        let destination: Task<MailDestinationIdentity?, Never>
+        if let existing = destinationTasks[key] {
+            destination = existing
+        } else {
+            destination = Task { [mailActions] in
+                guard !Task.isCancelled else { return nil }
+                let identity = await mailActions.destinationIdentity(for: location)
+                return Task.isCancelled ? nil : identity
+            }
+            destinationTasks[key] = destination
+        }
         let semanticDetail = location.semanticScore > 0
             ? ", semantic \(String(format: "%.2f", location.semanticScore))"
             : ""
@@ -169,7 +215,10 @@ final class AutomationRunner {
             detail: "\(location.hitCount) similar message\(location.hitCount == 1 ? "" : "s")\(semanticDetail) in \(location.displayPath)",
             systemImage: "tray.and.arrow.down"
         ) {
-            let result = self.result(title: "Move to \(location.mailboxName)", bridgeResult: self.mailBridge.moveSelectedMessages(to: location))
+            let identity = await destination.value
+            let result = self.result(title: "Move to \(location.mailboxName)", bridgeResult: await self.mailActions.move(
+                to: location, selection: selection, destination: identity
+            ))
             if !result.isError, let mailContext {
                 await MailMoveLearningStore.shared.record(context: mailContext, destination: location)
             }

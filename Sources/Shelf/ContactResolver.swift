@@ -40,6 +40,9 @@ final class ContactResolver {
         }
 
         switch hint.kind {
+        case .conversation:
+            // Slack display names and message text do not establish a Contacts identity.
+            return []
         case .contact:
             if let contactIdentifier = hint.contactIdentifier,
                let contact = contact(withIdentifier: contactIdentifier) {

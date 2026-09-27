@@ -30,6 +30,9 @@ struct LearnedMoveRecommendation {
     var senderMatchCount: Int
     var lastMovedAt: TimeInterval
     var sampleText: String
+    var sampleSender: String
+    var sampleSubject: String
+    var sampleBody: String
 }
 
 actor MailMoveLearningStore {
@@ -91,7 +94,10 @@ actor MailMoveLearningStore {
                 exampleCount: max(1, summary.matchCount),
                 senderMatchCount: summary.senderMatchCount,
                 lastMovedAt: summary.lastMatchedAt ?? example.createdAt,
-                sampleText: example.semanticText
+                sampleText: example.semanticText,
+                sampleSender: example.senderEmail ?? example.sender,
+                sampleSubject: example.subject,
+                sampleBody: example.bodyPreview
             )
         }
         .sorted { lhs, rhs in

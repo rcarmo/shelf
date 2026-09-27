@@ -11,6 +11,7 @@ let package = Package(
         .executable(name: "Shelf", targets: ["Shelf"])
     ],
     dependencies: [
+        .package(path: "Packages/TypedDecisions"),
         .package(
             url: "https://github.com/rcarmo/SwiftIntelligence",
             revision: "2a03f0b01c5486e571ff5753eedf4a76d43a2a8e"
@@ -20,6 +21,8 @@ let package = Package(
         .executableTarget(
             name: "Shelf",
             dependencies: [
+                .product(name: "DecisionCore", package: "TypedDecisions"),
+                .product(name: "DecisionFoundationModels", package: "TypedDecisions"),
                 .product(name: "SwiftIntelligence", package: "SwiftIntelligence")
             ],
             path: "Sources/Shelf",

@@ -3,6 +3,7 @@ import Foundation
 enum ShelfSettings {
     static let contentBaseFontSizeKey = "contentBaseFontSize"
     static let useAppleIntelligenceKey = "useAppleIntelligence"
+    static let mailDecisionModeKey = "mailDecisionMode"
     static let defaultContentBaseFontSize = 12.0
     static let minimumContentBaseFontSize = 10.0
     static let maximumContentBaseFontSize = 18.0

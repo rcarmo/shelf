@@ -78,10 +78,13 @@ if command -v codesign >/dev/null 2>&1; then
     fi
 
     if [[ -n "$SIGN_IDENTITY" ]]; then
-        codesign --force --sign "$SIGN_IDENTITY" "$APP_DIR" >/dev/null 2>&1 || true
+        codesign --force --sign "$SIGN_IDENTITY" "$APP_DIR"
     else
-        codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || true
+        echo "No code-signing identity is available. Set SHELF_CODESIGN_IDENTITY to your development identity." >&2
+        echo "For an explicitly disposable build, use SHELF_CODESIGN_IDENTITY=- (privacy grants may not survive rebuilds)." >&2
+        exit 1
     fi
+    codesign --verify --deep --strict "$APP_DIR"
 fi
 
 echo "$APP_DIR"

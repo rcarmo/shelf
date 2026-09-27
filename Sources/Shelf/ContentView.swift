@@ -42,12 +42,18 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
+            HSplitView {
                 contextPane
-                    .frame(minWidth: 280, idealWidth: 340, maxWidth: 400)
-                Divider()
+                    .frame(minWidth: 200, idealWidth: 340)
                 actionsPane
-                    .frame(minWidth: 360)
+                    .frame(minWidth: 260, idealWidth: 400)
+                    .onHover { hovering in
+                        if hovering { monitor.beginActionInteraction() }
+                    }
+                    .onKeyPress { _ in
+                        monitor.beginActionInteraction()
+                        return .ignored
+                    }
             }
             Divider()
             statusBar
@@ -62,52 +68,54 @@ struct ContentView: View {
                 .font(fonts.headline)
 
             if let hint = monitor.currentHint {
-                VStack(spacing: 4) {
-                    detailRow("App", hint.applicationName, systemImage: "app", lines: 1)
-                    detailRow("Hint", hint.kind.rawValue, systemImage: "scope", lines: 1)
-                    detailRow("Title", hint.title, systemImage: "text.alignleft", lines: 2)
-                    if !hint.subtitle.isEmpty {
-                        detailRow("Detail", hint.subtitle, systemImage: "info.circle", lines: 1)
-                    }
-                    if !hint.value.isEmpty {
-                        detailRow("Value", hint.value, systemImage: "link", lines: 1)
-                    }
-                }
-                .frame(height: 118, alignment: .top)
-                .clipped()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        VStack(spacing: 4) {
+                            detailRow("App", hint.applicationName, systemImage: "app")
+                            detailRow("Hint", hint.kind.rawValue, systemImage: "scope")
+                            detailRow("Title", hint.title, systemImage: "text.alignleft")
+                            if !hint.subtitle.isEmpty {
+                                detailRow("Detail", hint.subtitle, systemImage: "info.circle")
+                            }
+                            if !hint.value.isEmpty {
+                                detailRow("Value", hint.value, systemImage: "link")
+                            }
+                        }
 
-                if hint.bundleIdentifier == "com.apple.Safari",
-                   monitor.isResolvingSafariContext || monitor.safariContext != nil {
-                    ScrollView {
-                        safariContextSection
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if hint.bundleIdentifier == "com.apple.mail", monitor.mailNeedsFullDiskAccess {
+                            Label("Partial results: Mail storage access unavailable", systemImage: "exclamationmark.triangle")
+                                .font(fonts.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button(action: PrivacySettings.openFullDiskAccess) {
+                                Label("Open Full Disk Access Settings", systemImage: "lock.open")
+                            }
+                            .help("macOS Full Disk Access includes protected data beyond Mail. Relaunch Shelf after changing access.")
+                        }
+
+                        if let slack = hint.slackContext {
+                            SlackContextView(context: slack, baseFontSize: contentBaseFontSize,
+                                             requestAccess: monitor.requestAccessibilityAccess)
+                        } else if hint.bundleIdentifier == "com.apple.Safari",
+                           monitor.isResolvingSafariContext || monitor.safariContext != nil {
+                            safariContextSection
+                        } else if !monitor.similarMessages.isEmpty || !monitor.messageLocations.isEmpty {
+                            mailIntelligenceSection
+                        } else if hint.bundleIdentifier == "com.apple.mail", !monitor.mailSuggestionStatus.isEmpty {
+                            Text(monitor.mailSuggestionStatus)
+                                .font(fonts.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .layoutPriority(1)
-                } else if !monitor.similarMessages.isEmpty || !monitor.messageLocations.isEmpty {
-                    ScrollView {
-                        mailIntelligenceSection
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .layoutPriority(1)
-                } else if let hint = monitor.currentHint, hint.bundleIdentifier == "com.apple.mail", !monitor.mailSuggestionStatus.isEmpty {
-                    Text(monitor.mailSuggestionStatus)
-                        .font(fonts.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
-                        .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
                 EmptyStateView(
                     title: "No Context Yet",
                     systemImage: "eye",
-                    message: "Switch to Safari, Chrome, Mail, Finder, or Contacts to let Shelf infer what you are working with."
+                    message: "Switch to Safari, Chrome, Mail, Slack, Finder, or Contacts to let Shelf infer what you are working with."
                 )
-            }
-
-            if monitor.similarMessages.isEmpty && monitor.messageLocations.isEmpty && monitor.safariContext == nil {
-                Spacer()
             }
         }
         .padding(12)
@@ -175,6 +183,7 @@ struct ContentView: View {
                 .font(fonts.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .help(monitor.mailSuggestionStatus)
             Spacer()
             if let hint = monitor.currentHint {
                 Text(hint.applicationName)
@@ -208,7 +217,7 @@ struct ContentView: View {
         return "Shelf - \(hint.applicationName)"
     }
 
-    private func detailRow(_ label: String, _ value: String, systemImage: String, lines: Int) -> some View {
+    private func detailRow(_ label: String, _ value: String, systemImage: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: systemImage)
                 .font(fonts.caption)
@@ -222,8 +231,7 @@ struct ContentView: View {
                 .font(fonts.caption)
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
-                .lineLimit(lines)
-                .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(minHeight: 18, alignment: .top)

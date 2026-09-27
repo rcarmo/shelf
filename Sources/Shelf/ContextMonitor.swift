@@ -1,6 +1,9 @@
 import AppKit
 import Combine
 import Foundation
+import DecisionCore
+import DecisionFoundationModels
+import UniformTypeIdentifiers
 
 @MainActor
 final class ContextMonitor: ObservableObject {
@@ -22,12 +25,21 @@ final class ContextMonitor: ObservableObject {
     @Published var contactsPermission: PermissionState = .unknown
     @Published var accessibilityPermission: PermissionState = .unknown
     @Published var statusText = "Starting"
+    @Published private(set) var mailDecisionStatus = "Off"
+    @Published private(set) var mailDecisionRecords: [MailDecisionRecord] = []
 
     private let resolver = ContactResolver()
     private let extractors = ContextExtractorRegistry()
+    private let slackExtractor = SlackContextExtractor()
+    private var slackExtractionTask: Task<Void, Never>?
+    private var slackGeneration = UUID()
     private let messageRanker = SpotlightMessageRanker()
     private let safariResolver = SafariContextResolver()
     private let intelligenceAssistant = IntelligenceAssistant()
+    private let decisionEngine = DecisionEngine(model: AppleDecisionModel())
+    private var mailDecisionTask: Task<Void, Never>?
+    private var mailDecisionGeneration = UUID()
+    private var actionInteractionStarted = false
     let automation = AutomationRunner()
     private var timer: Timer?
     private var locationSearchTask: Task<Void, Never>?
@@ -87,6 +99,12 @@ final class ContextMonitor: ObservableObject {
             lastExternalApplication = app
         }
 
+        if app.bundleIdentifier == SlackContextExtractor.bundleIdentifier {
+            refreshSlackContext(from: app, force: force)
+            return
+        }
+        slackGeneration = UUID()
+        slackExtractionTask?.cancel()
         guard let hint = extractors.extract(from: app) else {
             currentHint = AppHint(
                 bundleIdentifier: app.bundleIdentifier ?? "",
@@ -112,12 +130,18 @@ final class ContextMonitor: ObservableObject {
             resetSafariContext()
             isSearchingMessages = false
             locationSearchTask?.cancel()
+            resetMailDecision()
             refreshActions()
             statusText = "Watching \(app.localizedName ?? "frontmost app")"
             return
         }
 
+        applyHint(hint, force: force)
+    }
+
+    private func applyHint(_ hint: AppHint, force: Bool) {
         if force || currentHint?.signature != hint.signature {
+            automation.invalidateMailBindings()
             currentHint = hint
             contacts = resolver.contacts(for: hint)
             selectedContact = contacts.first
@@ -133,6 +157,27 @@ final class ContextMonitor: ObservableObject {
             refreshActions()
             refreshMessageLocations(for: hint)
             refreshSafariContext(for: hint)
+            if let slack = hint.slackContext { statusText = slack.diagnostic }
+        }
+    }
+
+    private func refreshSlackContext(from app: NSRunningApplication, force: Bool) {
+        if currentHint?.bundleIdentifier != SlackContextExtractor.bundleIdentifier {
+            applyHint(SlackContext(isPartial: true, diagnostic: "Reading Slack context").appHint(), force: true)
+        }
+        // At most one read is admitted, including while a canceled AX call is finishing.
+        guard slackExtractionTask == nil else { return }
+        let generation = slackGeneration
+        let pid = app.processIdentifier
+        slackExtractionTask = Task { [weak self, slackExtractor] in
+            let hint = await slackExtractor.extract(processID: pid, force: force)
+            guard let self else { return }
+            self.slackExtractionTask = nil
+            guard !Task.isCancelled, self.slackGeneration == generation,
+                  self.lastExternalApplication?.processIdentifier == pid, let hint else { return }
+            let front = NSWorkspace.shared.frontmostApplication
+            guard front?.processIdentifier == pid || front?.bundleIdentifier == Bundle.main.bundleIdentifier else { return }
+            self.applyHint(hint, force: force)
         }
     }
 
@@ -142,6 +187,7 @@ final class ContextMonitor: ObservableObject {
     }
 
     func run(_ action: AppAutomationAction) async {
+        beginActionInteraction()
         let result = await action.run()
         lastResult = result
         scheduleResultClear(for: result)
@@ -197,6 +243,7 @@ final class ContextMonitor: ObservableObject {
 
     private func refreshMessageLocations(for hint: AppHint) {
         locationSearchTask?.cancel()
+        resetMailDecision()
         guard hint.bundleIdentifier == "com.apple.mail",
               let mailContext = hint.mailContext else {
             isSearchingMessages = false
@@ -305,6 +352,7 @@ final class ContextMonitor: ObservableObject {
         statusText = suggestionStatusText(for: suggestions, isFinal: update.isFinal)
 
         if update.isFinal {
+            assessMailFolders(suggestions.decisionEvidence, context: mailContext)
             summarizeSimilarMessagesIfNeeded(
                 suggestions.messages,
                 mailContext: mailContext,
@@ -397,6 +445,7 @@ final class ContextMonitor: ObservableObject {
         similarMessagesSummary = ""
 
         guard UserDefaults.standard.bool(forKey: ShelfSettings.useAppleIntelligenceKey),
+              mailDecisionMode == .off,
               !messages.isEmpty else {
             isSummarizingSimilarMessages = false
             return
@@ -454,6 +503,96 @@ final class ContextMonitor: ObservableObject {
         safariContext = nil
         safariNeedsFullDiskAccess = false
         isResolvingSafariContext = false
+    }
+
+    func beginActionInteraction() { actionInteractionStarted = true }
+
+    func exportMailDecisionDiagnostics() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "shelf-shadow-assessments.json"
+        let records = mailDecisionRecords
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            do { try DecisionJSON.encode(records).write(to: url, options: .atomic) }
+            catch { self?.mailDecisionStatus = "Could not export assessments" }
+        }
+    }
+
+    private var mailDecisionMode: MailDecisionMode {
+        MailDecisionMode(rawValue: UserDefaults.standard.string(forKey: ShelfSettings.mailDecisionModeKey) ?? "off") ?? .off
+    }
+
+    private func resetMailDecision() {
+        mailDecisionTask?.cancel()
+        mailDecisionTask = nil
+        mailDecisionGeneration = UUID()
+        actionInteractionStarted = false
+        mailDecisionStatus = mailDecisionMode == .off ? "Off" : "Waiting for Mail suggestions"
+    }
+
+    private func assessMailFolders(_ folders: [MailFolderEvidence], context: MailMessageContext) {
+        let mode = mailDecisionMode
+        guard mode != .off else { return }
+        guard mode != .rerank || MailDecisionAdapter.rankingApproved else {
+            mailDecisionStatus = "Reranking awaits evaluation"
+            return
+        }
+        let generation = mailDecisionGeneration
+        mailDecisionStatus = "Assessing in shadow mode"
+        mailDecisionTask = Task { [weak self] in
+            guard let self else { return }
+            let start = ContinuousClock.now
+            var captured: MailDecisionSnapshot?
+            do {
+                let snapshot = try await Task.detached(priority: .utility) {
+                    try MailDecisionAdapter.snapshot(context: context, folders: folders, generation: generation)
+                }.value
+                captured = snapshot
+                try Task.checkCancellation()
+                let response = try await decisionEngine.decide(snapshot.request, timeout: .seconds(8))
+                guard !Task.isCancelled, generation == mailDecisionGeneration,
+                      currentHint?.mailContext?.selectionSignature == snapshot.selectionSignature,
+                      mode == mailDecisionMode else {
+                    recordDecision(evaluation: .init(outcome: "stale_result", response: nil, fullRanking: nil,
+                                                     protectedRanking: nil, displayed: []),
+                                   snapshot: snapshot, generation: generation, start: start)
+                    return
+                }
+                let evaluation = MailDecisionAdapter.evaluate(response, snapshot: snapshot, mode: mode,
+                                                              activeGeneration: mailDecisionGeneration,
+                                                              selectionSignature: context.selectionSignature,
+                                                              interactionStarted: actionInteractionStarted)
+                recordDecision(evaluation: evaluation, snapshot: snapshot, generation: generation, start: start)
+                if evaluation.outcome == "reranked" {
+                    messageLocations = evaluation.displayed
+                    refreshActions()
+                }
+                mailDecisionStatus = evaluation.outcome == "shadow_ok" ? "Shadow assessment complete" : "Baseline retained: \(evaluation.outcome)"
+            } catch {
+                let failure = error as? DecisionFailure ?? (error is CancellationError
+                    ? DecisionFailure(.cancelled, "caller_cancelled") : DecisionFailure(.generationFailed, "adapter_error"))
+                let stale = generation != mailDecisionGeneration
+                let outcome = stale ? "stale_result" : "\(failure.code.rawValue):\(failure.reason)"
+                recordDecision(evaluation: .init(outcome: outcome, response: nil, fullRanking: nil,
+                                                protectedRanking: nil, displayed: messageLocations),
+                               snapshot: captured, generation: generation, start: start)
+                guard !Task.isCancelled, !stale else { return }
+                mailDecisionStatus = "Baseline retained: \(failure.reason)"
+            }
+        }
+    }
+
+    private func recordDecision(evaluation: MailDecisionEvaluation, snapshot: MailDecisionSnapshot?,
+                                generation: UUID, start: ContinuousClock.Instant) {
+        let elapsed = start.duration(to: .now).components
+        mailDecisionRecords.append(MailDecisionRecord(
+            requestID: generation.uuidString, outcome: evaluation.outcome,
+            elapsedMilliseconds: Int(elapsed.seconds * 1000 + elapsed.attoseconds / 1_000_000_000_000_000),
+            candidateCount: snapshot?.shortlist.count ?? 0, omittedCandidates: snapshot?.omittedCandidates ?? 0,
+            response: evaluation.response, fullRanking: evaluation.fullRanking, protectedRanking: evaluation.protectedRanking
+        ))
+        mailDecisionRecords = Array(mailDecisionRecords.suffix(100))
     }
 }
 

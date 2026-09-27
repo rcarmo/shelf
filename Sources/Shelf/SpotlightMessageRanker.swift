@@ -148,17 +148,16 @@ final class SpotlightMessageRanker {
 
             let messages = similarMessages(from: ranked, context: context)
             let rankedLocations = groupedLocations(from: ranked, currentMailbox: context.currentMailbox, context: context)
-            let locations = locationsIncludingVisibleMessageFolders(
-                rankedLocations,
-                messages: messages,
-                candidates: ranked
-            )
+            let orders = folderOrders(rankedLocations: rankedLocations, messages: messages, candidates: ranked)
+            let fullBaseline = orders.shortlist
+            let locations = orders.displayed
             let lsmDiagnostic = "LSM ranked \(locations.count) filing destination\(locations.count == 1 ? "" : "s")."
             return MailSuggestions(
                 locations: locations,
                 messages: messages,
                 diagnostic: [diagnostic, lsmDiagnostic].filter { !$0.isEmpty }.joined(separator: " "),
-                requiresFullDiskAccess: requiresFullDiskAccess
+                requiresFullDiskAccess: requiresFullDiskAccess,
+                decisionEvidence: decisionEvidence(locations: fullBaseline, candidates: ranked, messages: messages, context: context)
             )
         }.value
     }
@@ -320,7 +319,10 @@ final class SpotlightMessageRanker {
                 bodyPreview: recommendation.sampleText,
                 filingMemoryScore: recommendation.memoryScore,
                 filingMemoryCount: recommendation.exampleCount,
-                senderMemoryCount: recommendation.senderMatchCount
+                senderMemoryCount: recommendation.senderMatchCount,
+                learnedEvidenceSender: recommendation.sampleSender,
+                learnedEvidenceSubject: recommendation.sampleSubject,
+                learnedEvidenceBody: recommendation.sampleBody
             )
         }
     }
@@ -344,9 +346,10 @@ final class SpotlightMessageRanker {
         return ranked
     }
 
-    private func groupedLocations(from candidates: [MessageCandidate], currentMailbox: String, context: MailMessageContext) -> [RankedMessageLocation] {
+    func groupedLocations(from candidates: [MessageCandidate], currentMailbox: String, context: MailMessageContext) -> [RankedMessageLocation] {
         let usableCandidates = candidates.filter {
-            $0.supportsMailFiling && !isExcludedMailbox($0.mailboxInfo.mailboxPath)
+            $0.supportsMailFiling && isFilingDestination($0.mailboxInfo.mailboxPath, currentMailbox: currentMailbox)
+                && (!$0.contributesSimilarMessage || hasFilingEvidence($0, context: context))
         }
         let semanticScores = semanticScores(for: usableCandidates, context: context)
         let similarBackedLocations = groupedLocations(
@@ -437,35 +440,23 @@ final class SpotlightMessageRanker {
         return Array(grouped.values)
     }
 
-    private func filingSimilarityScore(_ candidate: MessageCandidate, context: MailMessageContext) -> Double {
+    func filingSimilarityScore(_ candidate: MessageCandidate, context: MailMessageContext) -> Double {
         let contextSender = normalizedSender(context.senderEmail ?? context.sender)
         let candidateSender = normalizedSender(candidate.header.sender ?? "")
         let contextSenderName = normalizedSenderDisplayName(context.sender)
         let candidateSenderName = normalizedSenderDisplayName(candidate.header.sender ?? "")
         let sameSender = (!contextSender.isEmpty && contextSender == candidateSender)
             || (!contextSenderName.isEmpty && contextSenderName == candidateSenderName)
-        let sameThread = !normalizedSubject(context.subject).isEmpty
-            && normalizedSubject(context.subject) == normalizedSubject(candidate.header.subject ?? "")
-
-        var score = sameSender ? 1.20 : 0
-        if sameThread {
-            score += 0.90
-        }
+        let subject = MailSubjectMatch(context.subject, candidate.header.subject ?? "")
+        var score = subject.filingBoost + (sameSender ? 0.60 : 0)
         if candidate.isLogicalMailCandidate {
             score += 0.50
         }
 
-        let contextSubjectTerms = Set(SubjectTokenizer.terms(from: context.subject, limit: 12))
-        let candidateSubjectTerms = Set(SubjectTokenizer.terms(from: candidate.header.subject ?? "", limit: 12))
-        let subjectUnion = contextSubjectTerms.union(candidateSubjectTerms)
-        if !subjectUnion.isEmpty {
-            score += Double(contextSubjectTerms.intersection(candidateSubjectTerms).count)
-                / Double(subjectUnion.count) * 0.45
-        }
         return score
     }
 
-    private func rankedLocations(_ locations: [RankedMessageLocation], preferHitCount: Bool) -> [RankedMessageLocation] {
+    func rankedLocations(_ locations: [RankedMessageLocation], preferHitCount: Bool) -> [RankedMessageLocation] {
         var merged: [String: RankedMessageLocation] = [:]
         for location in locations {
             if var existing = merged[location.displayPath] {
@@ -500,7 +491,6 @@ final class SpotlightMessageRanker {
                 }
                 return lhs.displayPath < rhs.displayPath
             }
-            .prefix(5)
             .map { $0 }
     }
 
@@ -517,79 +507,90 @@ final class SpotlightMessageRanker {
         return value
     }
 
-    private func locationsIncludingVisibleMessageFolders(
+    func folderOrders(rankedLocations: [RankedMessageLocation], messages: [SimilarMessage], candidates: [MessageCandidate])
+        -> (displayed: [RankedMessageLocation], shortlist: [RankedMessageLocation]) {
+        // Message relevance already orders the evidence. Promote its destinations before cutting the list.
+        let full = locationsIncludingVisibleMessageFolders(rankedLocations, messages: messages, candidates: candidates)
+        return (Array(full.prefix(5)), full)
+    }
+
+    func locationsIncludingVisibleMessageFolders(
         _ locations: [RankedMessageLocation],
         messages: [SimilarMessage],
         candidates: [MessageCandidate]
     ) -> [RankedMessageLocation] {
-        let visibleGroups = Dictionary(grouping: messages.filter { message in
-            !message.mailboxPath.isEmpty
-                && message.mailboxPath != ["Mail"]
-                && !isExcludedMailbox(message.mailboxPath)
-        }) { message in
-            message.mailboxPath.joined(separator: "\u{1F}")
-        }
-        .values
-        .filter { $0.count >= 2 }
-        .sorted { lhs, rhs in
-            if lhs.count != rhs.count {
-                return lhs.count > rhs.count
-            }
-            let lhsDate = lhs.compactMap(\.date).max() ?? .distantPast
-            let rhsDate = rhs.compactMap(\.date).max() ?? .distantPast
-            return lhsDate > rhsDate
-        }
-
-        guard !visibleGroups.isEmpty else {
-            return locations
-        }
-
         var locationByKey = Dictionary(uniqueKeysWithValues: locations.map {
             ($0.mailboxPath.joined(separator: "\u{1F}"), $0)
         })
-        let recentCutoff = Date().addingTimeInterval(-(90 * 24 * 60 * 60))
         var prioritized: [RankedMessageLocation] = []
-
-        for group in visibleGroups {
-            guard let message = group.first else {
-                continue
-            }
+        for message in messages {
             let key = message.mailboxPath.joined(separator: "\u{1F}")
-            if var location = locationByKey.removeValue(forKey: key) {
-                location.hitCount = max(location.hitCount, group.count)
-                location.recentHitCount = max(location.recentHitCount, group.filter { ($0.date ?? .distantPast) >= recentCutoff }.count)
+            // Never manufacture a move destination from a weak or excluded display-only hit.
+            if let location = locationByKey.removeValue(forKey: key) {
                 prioritized.append(location)
-                continue
             }
-
-            let candidate = candidates.first {
-                $0.mailboxInfo.mailboxPath.joined(separator: "\u{1F}") == key
-            }
-            prioritized.append(RankedMessageLocation(
-                mailboxPath: message.mailboxPath,
-                accountHint: appleScriptAccountHint(candidate?.mailboxInfo.accountHint),
-                score: Double(group.count * maximumResults),
-                semanticScore: 0,
-                hitCount: group.count,
-                recentHitCount: group.filter { ($0.date ?? .distantPast) >= recentCutoff }.count,
-                samplePath: message.path
-            ))
         }
 
         let remaining = locations.filter {
             locationByKey[$0.mailboxPath.joined(separator: "\u{1F}")] != nil
         }
-        return Array((prioritized + remaining).prefix(5))
+        return prioritized + remaining
     }
 
-    private func similarMessages(from candidates: [MessageCandidate], context: MailMessageContext) -> [SimilarMessage] {
-        var seen = Set<String>()
+    private func isFilingDestination(_ path: [String], currentMailbox: String) -> Bool {
+        guard let leaf = path.last?.lowercased(), path != ["Mail"], !isExcludedMailbox(path) else { return false }
+        return leaf != currentMailbox.lowercased()
+            && !["draft", "drafts", "outbox", "sent", "sent mail", "sent messages", "sent items"].contains(leaf)
+    }
+
+    private func hasFilingEvidence(_ candidate: MessageCandidate, context: MailMessageContext) -> Bool {
+        let subject = MailSubjectMatch(context.subject, candidate.header.subject ?? "")
+        let sender = normalizedSender(context.senderEmail ?? context.sender)
+        let sameSender = !sender.isEmpty && sender == normalizedSender(candidate.header.sender ?? "")
+        // A generic body/footer or a single cross-sender word is not a filing example.
+        return subject.exact || subject.strong || sameSender
+    }
+
+    private func decisionEvidence(locations: [RankedMessageLocation], candidates: [MessageCandidate],
+                                  messages: [SimilarMessage], context: MailMessageContext) -> [MailFolderEvidence] {
+        locations.map { location in
+            let matches = candidates.filter { $0.mailboxInfo.mailboxPath == location.mailboxPath }
+            let accounts = Set(matches.compactMap { appleScriptAccountHint($0.mailboxInfo.accountHint) })
+            var seen = Set<String>()
+            let records = matches.filter { $0.contributesSimilarMessage || $0.isLearnedMoveCandidate }.sorted {
+                if $0.bodyPreview.utf8.count != $1.bodyPreview.utf8.count { return $0.bodyPreview.utf8.count > $1.bodyPreview.utf8.count }
+                return $0.path < $1.path
+            }.compactMap { candidate -> MailEvidenceRecord? in
+                let key = candidate.isLearnedMoveCandidate ? candidate.path : dedupeKey(for: candidate)
+                guard seen.insert(key).inserted else { return nil }
+                let sender = normalizedSender(context.senderEmail ?? context.sender)
+                let name = normalizedSenderDisplayName(context.sender)
+                let subject = normalizedSubject(context.subject)
+                let evidenceSender = candidate.learnedEvidenceSender ?? candidate.header.sender ?? ""
+                let evidenceSubject = candidate.learnedEvidenceSubject ?? candidate.header.subject ?? ""
+                return MailEvidenceRecord(
+                    sourceID: key, subject: evidenceSubject, excerpt: candidate.learnedEvidenceBody ?? candidate.bodyPreview,
+                    sameSender: (!sender.isEmpty && sender == normalizedSender(evidenceSender))
+                        || (!name.isEmpty && name == normalizedSenderDisplayName(evidenceSender)),
+                    sameThread: !subject.isEmpty && subject == normalizedSubject(evidenceSubject),
+                    date: candidate.header.date, isLearnedMove: candidate.isLearnedMoveCandidate,
+                    moveCount: candidate.filingMemoryCount, senderMoveCount: candidate.senderMemoryCount
+                )
+            }
+            return MailFolderEvidence(location: location, records: records,
+                                      visibleRelatedCount: messages.filter { $0.mailboxPath == location.mailboxPath }.count,
+                                      ambiguousAccount: accounts.count > 1)
+        }
+    }
+
+    func similarMessages(from candidates: [MessageCandidate], context: MailMessageContext) -> [SimilarMessage] {
         let scored = candidates.compactMap { candidate -> (candidate: MessageCandidate, score: Double, strict: Bool)? in
             guard candidate.contributesSimilarMessage,
-                  !isExcludedMailbox(candidate.mailboxInfo.mailboxPath),
-                  seen.insert(dedupeKey(for: candidate)).inserted else {
+                  !isExcludedMailbox(candidate.mailboxInfo.mailboxPath) else {
                 return nil
             }
+            let sameSender = normalizedSender(candidate.header.sender ?? "") == normalizedSender(context.senderEmail ?? context.sender)
+            guard sameSender || hasRelatedTextSignal(candidate, context: context) else { return nil }
             let score = relatedMessageScore(candidate, context: context)
             let strict = score >= relatedMessageMinimumScore(candidate, context: context)
             guard strict || relaxedRelatedMessageFallback(candidate, context: context, score: score) else {
@@ -599,16 +600,19 @@ final class SpotlightMessageRanker {
             return (candidate, score, strict)
         }
 
-        let strictMatches = scored.filter(\.strict)
-        let displayMatches = strictMatches.isEmpty ? scored : strictMatches
-
-        return displayMatches
+        var seen = Set<String>()
+        return scored
         .sorted { lhs, rhs in
+            if lhs.strict != rhs.strict { return lhs.strict }
             if lhs.score == rhs.score {
-                return (lhs.candidate.header.date ?? .distantPast) > (rhs.candidate.header.date ?? .distantPast)
+                let lhsDate = lhs.candidate.header.date ?? .distantPast
+                let rhsDate = rhs.candidate.header.date ?? .distantPast
+                return lhsDate == rhsDate ? lhs.candidate.path < rhs.candidate.path : lhsDate > rhsDate
             }
             return lhs.score > rhs.score
         }
+        // Choose the best copy after scoring; a header-only hit must not hide a richer hit.
+        .filter { seen.insert(dedupeKey(for: $0.candidate)).inserted }
         .prefix(10)
         .map { item in
             let candidate = item.candidate
@@ -638,10 +642,7 @@ final class SpotlightMessageRanker {
         .joined(separator: "\n")
         .lowercased()
 
-        let contextSubjectTerms = Set(SubjectTokenizer.terms(from: context.subject, limit: 10))
-        let candidateSubjectTerms = Set(SubjectTokenizer.terms(from: candidate.header.subject ?? "", limit: 10))
-        let subjectIntersection = contextSubjectTerms.intersection(candidateSubjectTerms)
-        let subjectUnion = contextSubjectTerms.union(candidateSubjectTerms)
+        let subjectMatch = MailSubjectMatch(context.subject, candidate.header.subject ?? "")
 
         let contextBodyTerms = Set(SubjectTokenizer.terms(from: context.bodyPreview, limit: 24))
         let candidateBodyTerms = Set(SubjectTokenizer.terms(from: candidate.bodyPreview, limit: 24))
@@ -659,29 +660,13 @@ final class SpotlightMessageRanker {
         let sameSenderEmail = !contextSender.isEmpty && candidateSender == contextSender
         let sameSenderName = !contextSenderName.isEmpty && contextSenderName == candidateSenderName
         let sameSender = sameSenderEmail || sameSenderName
-        let contextSubject = normalizedSubject(context.subject)
-        let candidateSubject = normalizedSubject(candidate.header.subject ?? "")
-        let sameThread = !contextSubject.isEmpty && contextSubject == candidateSubject
-        if sameThread && sameSender {
-            score += 180
-        } else {
-            if sameThread {
-                score += 90
-            }
-            if sameSender {
-                score += 95
-            }
-        }
+        score += subjectMatch.relatedBoost
+        if sameSender { score += 45 }
         if !sameSender, !contextSender.isEmpty, candidateText.contains(contextSender) {
             score += 45
         }
         if !contextDomain.isEmpty, candidateText.contains(contextDomain) {
             score += 18
-        }
-
-        score += Double(subjectIntersection.count) * 14
-        if !subjectUnion.isEmpty {
-            score += (Double(subjectIntersection.count) / Double(subjectUnion.count)) * 50
         }
 
         score += Double(min(bodyIntersection.count, 6)) * 5
@@ -707,6 +692,11 @@ final class SpotlightMessageRanker {
     }
 
     private func relaxedRelatedMessageFallback(_ candidate: MessageCandidate, context: MailMessageContext, score: Double) -> Bool {
+        let subjectOverlap = Set(MailSubjectMatch.terms(context.subject))
+            .intersection(MailSubjectMatch.terms(candidate.header.subject ?? ""))
+        let bodyOverlap = Set(SubjectTokenizer.terms(from: context.bodyPreview, limit: 24))
+            .intersection(SubjectTokenizer.terms(from: candidate.bodyPreview, limit: 24))
+        if score >= 18, !subjectOverlap.isEmpty || bodyOverlap.count >= 2 { return true }
         let contextSender = normalizedSender(context.senderEmail ?? context.sender)
         let candidateSender = normalizedSender(candidate.header.sender ?? "")
         guard !contextSender.isEmpty else {
@@ -721,7 +711,7 @@ final class SpotlightMessageRanker {
               let candidateDomain = candidateSender.split(separator: "@").last else {
             return false
         }
-        return contextDomain == candidateDomain && score >= 20
+        return contextDomain == candidateDomain && score >= 20 && hasRelatedTextSignal(candidate, context: context)
     }
 
     private func hasRelatedTextSignal(_ candidate: MessageCandidate, context: MailMessageContext) -> Bool {
@@ -731,8 +721,8 @@ final class SpotlightMessageRanker {
             return true
         }
 
-        let subjectOverlap = Set(SubjectTokenizer.terms(from: context.subject, limit: 10))
-            .intersection(Set(SubjectTokenizer.terms(from: candidate.header.subject ?? "", limit: 10)))
+        let subjectOverlap = Set(MailSubjectMatch.terms(context.subject))
+            .intersection(Set(MailSubjectMatch.terms(candidate.header.subject ?? "")))
         if !subjectOverlap.isEmpty {
             return true
         }
@@ -749,25 +739,7 @@ final class SpotlightMessageRanker {
     }
 
     private func normalizedSubject(_ value: String) -> String {
-        var subject = value.lowercased()
-        while true {
-            let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("re:") {
-                subject = String(trimmed.dropFirst(3))
-            } else if trimmed.hasPrefix("fw:") {
-                subject = String(trimmed.dropFirst(3))
-            } else if trimmed.hasPrefix("fwd:") {
-                subject = String(trimmed.dropFirst(4))
-            } else {
-                subject = trimmed
-                break
-            }
-        }
-        return subject
-            .replacingOccurrences(of: #"\[[^\]]+\]"#, with: " ", options: .regularExpression)
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { $0.count > 2 }
-            .joined(separator: " ")
+        MailSubjectMatch.normalized(value)
     }
 
     private func isExcludedMailbox(_ mailboxPath: [String]) -> Bool {
@@ -951,18 +923,18 @@ final class SpotlightMessageRanker {
 
 }
 
-private struct MailboxInfo {
+struct MailboxInfo {
     var mailboxPath: [String]
     var accountHint: String?
 }
 
-private struct MessageHeader {
+struct MessageHeader {
     var subject: String?
     var sender: String?
     var date: Date?
 }
 
-private struct MessageCandidate {
+struct MessageCandidate {
     var path: String
     var rank: Int
     var supportsMailFiling: Bool
@@ -973,6 +945,9 @@ private struct MessageCandidate {
     var filingMemoryScore: Double = 0
     var filingMemoryCount: Int = 0
     var senderMemoryCount: Int = 0
+    var learnedEvidenceSender: String?
+    var learnedEvidenceSubject: String?
+    var learnedEvidenceBody: String?
 
     var isLearnedMoveCandidate: Bool {
         path.hasPrefix("shelf-learning://")
@@ -1152,7 +1127,7 @@ private enum MIMEHeaderDecoder {
     }
 }
 
-private final class SpotlightMailQuery: NSObject {
+final class SpotlightMailQuery: NSObject {
     private static let queryStringKey = "NSMetadataQueryString"
     enum SearchMode {
         case sender
@@ -1170,31 +1145,25 @@ private final class SpotlightMailQuery: NSObject {
     private let continuation: CheckedContinuation<[MessageCandidate], Never>?
     private let streamContinuation: AsyncStream<[MessageCandidate]>.Continuation?
     private var query: NSMetadataQuery?
-    private var delayedFinish: DispatchWorkItem?
     private var timeoutFinish: DispatchWorkItem?
     private var didResume = false
     private var lastChunkSignature = ""
-
-    private var settleDelay: TimeInterval {
-        switch mode {
-        case .semantic:
-            return 0.75
-        case .threadSubject:
-            return 0.45
-        case .sender:
-            return 0.15
-        }
-    }
+    private var lastSnapshotTime = ContinuousClock.now - .seconds(1)
+    private let processingQueue = DispatchQueue(label: "com.taoofmac.shelf.spotlight-results", qos: .userInitiated)
+    private var processingSnapshot = false
+    private var parsedMessages: [String: (header: MessageHeader, bodyPreview: String)] = [:]
 
     private var timeoutDelay: TimeInterval {
         switch mode {
-        case .semantic:
-            return 3.0
-        case .threadSubject:
-            return 2.0
+        case .semantic, .threadSubject:
+            return 4.0
         case .sender:
-            return 0.85
+            return 2.5
         }
+    }
+
+    static func matchingPredicate(context: MailMessageContext, terms: [String], mode: SearchMode) -> NSPredicate {
+        SpotlightMailQuery(context: context, terms: terms, limit: 80, mode: mode, streamContinuation: nil).predicate()
     }
 
     static func search(context: MailMessageContext, terms: [String], limit: Int, mode: SearchMode) async -> [MessageCandidate] {
@@ -1224,6 +1193,10 @@ private final class SpotlightMailQuery: NSObject {
                     streamContinuation: continuation
                 )
                 active[runner.id] = runner
+                let id = runner.id
+                continuation.onTermination = { _ in
+                    DispatchQueue.main.async { active[id]?.finish(includeCandidates: false) }
+                }
                 runner.start()
             }
         }
@@ -1250,7 +1223,7 @@ private final class SpotlightMailQuery: NSObject {
         terms: [String],
         limit: Int,
         mode: SearchMode,
-        streamContinuation: AsyncStream<[MessageCandidate]>.Continuation
+        streamContinuation: AsyncStream<[MessageCandidate]>.Continuation?
     ) {
         self.context = context
         self.terms = terms
@@ -1268,7 +1241,7 @@ private final class SpotlightMailQuery: NSObject {
 
         let nextQuery = NSMetadataQuery()
         query = nextQuery
-        nextQuery.searchScopes = [NSMetadataQueryLocalComputerScope]
+        nextQuery.searchScopes = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Mail", isDirectory: true)]
         nextQuery.predicate = predicate()
         nextQuery.sortDescriptors = [
             NSSortDescriptor(key: "kMDItemContentCreationDate", ascending: false),
@@ -1287,7 +1260,16 @@ private final class SpotlightMailQuery: NSObject {
             name: .NSMetadataQueryDidUpdate,
             object: nextQuery
         )
-        nextQuery.start()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(queryDidUpdate(_:)),
+            name: .NSMetadataQueryGatheringProgress,
+            object: nextQuery
+        )
+        guard nextQuery.start() else {
+            finish()
+            return
+        }
 
         let timeoutFinish = DispatchWorkItem { [weak self] in
             self?.finish()
@@ -1303,48 +1285,43 @@ private final class SpotlightMailQuery: NSObject {
             return
         }
         yieldCurrentCandidates()
-        scheduleResultFinish()
     }
 
     @objc private func queryDidFinish(_ notification: Notification) {
         finish()
     }
 
-    private func scheduleResultFinish() {
-        guard delayedFinish == nil else {
-            return
-        }
-
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.finish()
-        }
-        delayedFinish = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay, execute: workItem)
-    }
-
-    private func finish() {
+    private func finish(includeCandidates: Bool = true) {
         guard !didResume else {
             return
         }
-        guard let query else {
+        if !includeCandidates {
+            stopQuery()
+            complete([])
             return
         }
+        guard query != nil else {
+            return
+        }
+        let items = snapshotItems()
+        stopQuery()
+        processingQueue.async {
+            let candidates = self.candidates(from: items)
+            DispatchQueue.main.async { self.complete(candidates) }
+        }
+    }
 
-        delayedFinish?.cancel()
-        delayedFinish = nil
+    private func stopQuery() {
         timeoutFinish?.cancel()
         timeoutFinish = nil
-
-        query.disableUpdates()
-        let candidates = candidates(from: query)
-        query.enableUpdates()
-        query.stop()
-        NotificationCenter.default.removeObserver(self, name: .NSMetadataQueryDidFinishGathering, object: query)
-        NotificationCenter.default.removeObserver(self, name: .NSMetadataQueryDidUpdate, object: query)
+        query?.stop()
         self.query = nil
-
-        didResume = true
         NotificationCenter.default.removeObserver(self)
+    }
+
+    private func complete(_ candidates: [MessageCandidate]) {
+        guard !didResume else { return }
+        didResume = true
         if let continuation {
             continuation.resume(returning: candidates)
         }
@@ -1356,14 +1333,22 @@ private final class SpotlightMailQuery: NSObject {
     }
 
     private func yieldCurrentCandidates() {
-        guard let query, streamContinuation != nil else {
+        guard query != nil, streamContinuation != nil, !processingSnapshot,
+              lastSnapshotTime.duration(to: .now) >= .milliseconds(300) else {
             return
         }
+        lastSnapshotTime = .now
 
-        query.disableUpdates()
-        let candidates = candidates(from: query)
-        query.enableUpdates()
-        yield(candidates)
+        let items = snapshotItems()
+        processingSnapshot = true
+        processingQueue.async {
+            let candidates = self.candidates(from: items)
+            DispatchQueue.main.async {
+                self.processingSnapshot = false
+                guard !self.didResume, self.query != nil else { return }
+                self.yield(candidates)
+            }
+        }
     }
 
     private func yield(_ candidates: [MessageCandidate]) {
@@ -1379,8 +1364,10 @@ private final class SpotlightMailQuery: NSObject {
         streamContinuation.yield(candidates)
     }
 
-    private func candidates(from query: NSMetadataQuery) -> [MessageCandidate] {
-        var seenPaths = Set<String>()
+    private func snapshotItems() -> [NSMetadataItem] {
+        guard let query else { return [] }
+        query.disableUpdates()
+        defer { query.enableUpdates() }
         let inspectedLimit: Int
         switch mode {
         case .semantic:
@@ -1390,28 +1377,35 @@ private final class SpotlightMailQuery: NSObject {
         case .sender:
             inspectedLimit = min(max(limit * 2, 80), 160)
         }
-        return Array(query.results.prefix(inspectedLimit))
+        // Retain a bounded result snapshot; never access the live query from the worker.
+        return query.results.prefix(inspectedLimit).compactMap { $0 as? NSMetadataItem }
+    }
+
+    private func candidates(from items: [NSMetadataItem]) -> [MessageCandidate] {
+        var seenPaths = Set<String>()
+        return items
             .enumerated()
             .compactMap { index, item -> MessageCandidate? in
-                guard let item = item as? NSMetadataItem else {
-                    return nil
-                }
                 guard let candidate = candidate(from: item, rank: index + 1),
                       seenPaths.insert(candidate.path).inserted else {
                     return nil
                 }
                 return candidate
             }
+            .map { (candidate: $0, score: relevanceScore(for: $0)) }
             .sorted { lhs, rhs in
-                let lhsScore = relevanceScore(for: lhs)
-                let rhsScore = relevanceScore(for: rhs)
-                if lhsScore == rhsScore {
-                    return (lhs.header.date ?? .distantPast) > (rhs.header.date ?? .distantPast)
+                if lhs.score == rhs.score {
+                    return (lhs.candidate.header.date ?? .distantPast) > (rhs.candidate.header.date ?? .distantPast)
                 }
-                return lhsScore > rhsScore
+                return lhs.score > rhs.score
             }
             .prefix(limit)
-            .map { $0 }
+            .map(\.candidate)
+    }
+
+    static func relevanceScore(for candidate: MessageCandidate, context: MailMessageContext, terms: [String], limit: Int = 80) -> Int {
+        SpotlightMailQuery(context: context, terms: terms, limit: limit, mode: .semantic, streamContinuation: nil)
+            .relevanceScore(for: candidate)
     }
 
     private func relevanceScore(for candidate: MessageCandidate) -> Int {
@@ -1429,27 +1423,17 @@ private final class SpotlightMailQuery: NSObject {
         .lowercased()
 
         var score = 0
-        let contextSubject = normalizedSubject(context.subject)
-        let candidateSubject = normalizedSubject(candidate.header.subject ?? "")
-        let sameThread = !contextSubject.isEmpty && contextSubject == candidateSubject
+        let subjectMatch = MailSubjectMatch(context.subject, candidate.header.subject ?? "")
         let sameSenderEmail = !senderNeedle.isEmpty && candidateSender == senderNeedle
         let sameSenderName = !contextSenderName.isEmpty && contextSenderName == candidateSenderName
         let sameSender = sameSenderEmail || sameSenderName
-        if sameThread && sameSender {
-            score += 420
-        } else {
-            if sameThread {
-                score += 240
-            }
-            if sameSender {
-                score += 320
-            }
-        }
+        score += subjectMatch.retrievalBoost
+        if sameSender { score += 140 }
         if !sameSender, !senderNeedle.isEmpty, text.contains(senderNeedle) {
-            score += 220
+            score += 110
         }
         if let domain = senderNeedle.split(separator: "@").last, text.contains(domain.lowercased()) {
-            score += 60
+            score += 30
         }
 
         let uniqueTerms = Set(terms.map { $0.lowercased() }.filter { $0.count >= 4 && $0 != senderNeedle })
@@ -1475,25 +1459,7 @@ private final class SpotlightMailQuery: NSObject {
     }
 
     private func normalizedSubject(_ value: String) -> String {
-        var subject = value.lowercased()
-        while true {
-            let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("re:") {
-                subject = String(trimmed.dropFirst(3))
-            } else if trimmed.hasPrefix("fw:") {
-                subject = String(trimmed.dropFirst(3))
-            } else if trimmed.hasPrefix("fwd:") {
-                subject = String(trimmed.dropFirst(4))
-            } else {
-                subject = trimmed
-                break
-            }
-        }
-        return subject
-            .replacingOccurrences(of: #"\[[^\]]+\]"#, with: " ", options: .regularExpression)
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { $0.count > 2 }
-            .joined(separator: " ")
+        MailSubjectMatch.normalized(value)
     }
 
     private func predicate() -> NSPredicate {
@@ -1501,7 +1467,7 @@ private final class SpotlightMailQuery: NSObject {
         let needles = searchNeedles()
 
         guard !needles.isEmpty else {
-            return mailItem
+            return NSPredicate(value: false)
         }
 
         if mode == .threadSubject {
@@ -1538,11 +1504,20 @@ private final class SpotlightMailQuery: NSObject {
             NSCompoundPredicate(orPredicateWithSubpredicates: [
                 NSPredicate(format: "kMDItemSubject LIKE[cd] %@", pattern),
                 NSPredicate(format: "kMDItemTitle LIKE[cd] %@", pattern),
-                NSPredicate(format: "kMDItemDisplayName LIKE[cd] %@", pattern),
-                NSPredicate(format: "kMDItemTextContent LIKE[cd] %@", pattern)
+                NSPredicate(format: "kMDItemDisplayName LIKE[cd] %@", pattern)
             ])
         }
-        return NSCompoundPredicate(andPredicateWithSubpredicates: perTermPredicates)
+        guard perTermPredicates.count > 1 else {
+            return NSCompoundPredicate(orPredicateWithSubpredicates: perTermPredicates)
+        }
+        // Two subject terms survive changing dates, prefixes and conversation titles.
+        // Keep this subject-only; body matches already have their own broader query.
+        let pairs = perTermPredicates.indices.flatMap { first in
+            perTermPredicates.indices.dropFirst(first + 1).map { second in
+                NSCompoundPredicate(andPredicateWithSubpredicates: [perTermPredicates[first], perTermPredicates[second]])
+            }
+        }
+        return NSCompoundPredicate(orPredicateWithSubpredicates: pairs)
     }
 
     private func mailItemPredicate() -> NSPredicate {
@@ -1581,11 +1556,11 @@ private final class SpotlightMailQuery: NSObject {
         var values: [String] = []
         let senderDomain = context.senderEmail?.split(separator: "@").last.map { String($0).lowercased() }
         if mode == .threadSubject {
-            return Array(NSOrderedSet(array: SubjectTokenizer.terms(from: normalizedSubject(context.subject), limit: 12))) as? [String] ?? []
+            return Array(NSOrderedSet(array: MailSubjectMatch.terms(context.subject))) as? [String] ?? []
         }
 
         if mode == .semantic {
-            values.append(contentsOf: SubjectTokenizer.terms(from: context.subject, limit: 12))
+            values.append(contentsOf: MailSubjectMatch.terms(context.subject))
             values.append(contentsOf: SubjectTokenizer.terms(from: context.bodyPreview, limit: 24))
             values.append(contentsOf: terms.filter { term in
                 let term = term.lowercased()
@@ -1602,7 +1577,7 @@ private final class SpotlightMailQuery: NSObject {
             values.append(context.sender)
             return Array(NSOrderedSet(array: values.map {
                 $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-            }.filter { $0.count >= 4 })) as? [String] ?? []
+            }.filter { $0.count >= 3 })) as? [String] ?? []
         }
 
         if let senderEmail = context.senderEmail, !senderEmail.isEmpty {
@@ -1610,6 +1585,8 @@ private final class SpotlightMailQuery: NSObject {
             values.append(context.sender)
         } else if let email = EmailAddress.first(in: context.sender) {
             values.append(email)
+        } else {
+            values.append(normalizedDisplayName(from: context.sender))
         }
 
         return Array(NSOrderedSet(array: values.map {
@@ -1618,13 +1595,15 @@ private final class SpotlightMailQuery: NSObject {
     }
 
     private func candidate(from item: NSMetadataItem, rank: Int) -> MessageCandidate? {
-        guard let path = item.value(forAttribute: "kMDItemPath") as? String else {
+        guard let path = item.value(forAttribute: "kMDItemPath") as? String,
+              Self.isManagedMailPath(path) else {
             return nil
         }
         guard isMailItem(path: path, item: item) else {
             return nil
         }
-        let parsed = parseMessage(path: path)
+        let parsed = parsedMessages[path] ?? parseMessage(path: path)
+        parsedMessages[path] = parsed
         let subject = parsed.header.subject
             ?? item.value(forAttribute: "kMDItemSubject") as? String
             ?? item.value(forAttribute: "kMDItemTitle") as? String
@@ -1653,6 +1632,12 @@ private final class SpotlightMailQuery: NSObject {
             ),
             bodyPreview: parsed.bodyPreview.isEmpty ? decodedSubject ?? "" : parsed.bodyPreview
         )
+    }
+
+    static func isManagedMailPath(_ path: String, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
+        let root = home.appendingPathComponent("Library/Mail", isDirectory: true).standardizedFileURL.path + "/"
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        return url.path.hasPrefix(root) && url.pathComponents.contains { $0.hasSuffix(".mbox") }
     }
 
     private func parseMessage(path: String) -> (header: MessageHeader, bodyPreview: String) {
@@ -1791,6 +1776,7 @@ private actor MailHeaderCache {
     private var loaded = false
     private var warming = false
     private var lastWarm: Date?
+    private var warmEnumerator: FileManager.DirectoryEnumerator?
     private var recordsByPath: [String: MailHeaderRecord] = [:]
     private var pathsByEmail: [String: Set<String>] = [:]
     private var mailboxesByPath: [String: MailboxCatalogRecord] = [:]
@@ -1805,16 +1791,17 @@ private actor MailHeaderCache {
         refreshMailboxCatalog(budget: foregroundMailboxBudget)
 
         let cached = rankedCandidates(for: context, sender: sender, terms: terms, limit: limit)
-        if similarMessageCandidateCount(in: cached) >= min(4, limit) {
+        if similarMessageCandidateCount(in: cached) >= min(4, limit),
+           cached.contains(where: { MailSubjectMatch(context.subject, $0.header.subject ?? "").strong }) {
             startBackgroundWarmIfNeeded()
-            return (cached, cacheDiagnostic(prefix: "Mail header cache returned", candidates: cached), false)
+            return (cached, cacheDiagnostic(prefix: "Mail header cache returned", candidates: cached), !FileManager.default.isReadableFile(atPath: mailRoot.path))
         }
 
         let foreground = await foregroundScan(context: context, sender: sender, terms: terms, limit: limit)
         if !foreground.isEmpty {
             await save()
             startBackgroundWarmIfNeeded()
-            return (foreground, cacheDiagnostic(prefix: "Mail header cache warmed", candidates: foreground), false)
+            return (foreground, cacheDiagnostic(prefix: "Mail header cache warmed", candidates: foreground), !FileManager.default.isReadableFile(atPath: mailRoot.path))
         }
 
         startBackgroundWarmIfNeeded()
@@ -1900,7 +1887,7 @@ private actor MailHeaderCache {
         let cached = rankedThreadCandidates(for: context, normalizedThreadSubject: threadSubject, limit: limit)
         if !cached.isEmpty {
             startBackgroundWarmIfNeeded()
-            return (cached, "Mail header thread search returned \(cached.count) local thread candidate\(cached.count == 1 ? "" : "s").", false)
+            return (cached, "Mail header thread search returned \(cached.count) local thread candidate\(cached.count == 1 ? "" : "s").", !FileManager.default.isReadableFile(atPath: mailRoot.path))
         }
 
         let foreground = await foregroundThreadScan(context: context, normalizedThreadSubject: threadSubject, limit: limit)
@@ -1940,7 +1927,7 @@ private actor MailHeaderCache {
 
     private func foregroundScan(context: MailMessageContext, sender: String, terms: [String], limit: Int) async -> [MessageCandidate] {
         let deadline = Date().addingTimeInterval(foregroundScanBudget)
-        let roots = prioritizedMailboxRoots(for: context, sender: sender, terms: terms)
+        let roots = currentAccountRoots(for: context) + prioritizedMailboxRoots(for: context, sender: sender, terms: terms)
         for root in roots {
             scan(root: root, sender: sender, deadline: deadline, stopAfterMatches: limit)
             let candidates = rankedCandidates(for: context, sender: sender, terms: terms, limit: limit)
@@ -1957,15 +1944,27 @@ private actor MailHeaderCache {
 
     private func foregroundThreadScan(context: MailMessageContext, normalizedThreadSubject: String, limit: Int) async -> [MessageCandidate] {
         let deadline = Date().addingTimeInterval(foregroundThreadScanBudget)
-        scan(root: mailRoot, sender: nil, deadline: deadline, stopAfterMatches: nil)
+        let roots = currentAccountRoots(for: context)
+        for root in roots.isEmpty ? [mailRoot] : roots {
+            scan(root: root, sender: nil, deadline: deadline, stopAfterMatches: nil)
+        }
         return rankedThreadCandidates(for: context, normalizedThreadSubject: normalizedThreadSubject, limit: limit)
+    }
+
+    private func currentAccountRoots(for context: MailMessageContext) -> [URL] {
+        guard let accountID = context.selection.first?.accountID, UUID(uuidString: accountID) != nil,
+              let versions = try? FileManager.default.contentsOfDirectory(at: mailRoot, includingPropertiesForKeys: nil) else { return [] }
+        return versions.filter { $0.lastPathComponent.range(of: #"^V\d+$"#, options: .regularExpression) != nil }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedDescending }
+            .prefix(3).map { $0.appendingPathComponent(accountID, isDirectory: true) }
+            .filter { FileManager.default.isReadableFile(atPath: $0.path) }
     }
 
     private func startBackgroundWarmIfNeeded() {
         guard !warming else {
             return
         }
-        if let lastWarm, Date().timeIntervalSince(lastWarm) < backgroundWarmInterval {
+        if let lastWarm, Date().timeIntervalSince(lastWarm) < (warmEnumerator == nil ? backgroundWarmInterval : 30) {
             return
         }
         warming = true
@@ -1975,8 +1974,28 @@ private actor MailHeaderCache {
     }
 
     private func warmAll() async {
-        let deadline = Date().addingTimeInterval(120)
-        scan(root: mailRoot, sender: nil, deadline: deadline, stopAfterMatches: nil)
+        if warmEnumerator == nil {
+            warmEnumerator = FileManager.default.enumerator(
+                at: mailRoot, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+                options: [.skipsHiddenFiles])
+        }
+        // Resume the same walk after each bounded pass, yielding to foreground searches.
+        let deadline = Date().addingTimeInterval(8)
+        var visited = 0
+        while !Task.isCancelled, Date() < deadline, visited < 8_192 {
+            guard let url = warmEnumerator?.nextObject() as? URL else {
+                warmEnumerator = nil
+                break
+            }
+            visited += 1
+            if url.pathExtension == "mbox" { rememberMailbox(url: url) }
+            if url.pathExtension == "emlx", let record = record(for: url) { insert(record) }
+            if visited.isMultiple(of: 128) {
+                trimIfNeeded()
+                await Task.yield()
+            }
+        }
+        trimIfNeeded()
         lastWarm = Date()
         warming = false
         await save()
@@ -2026,8 +2045,10 @@ private actor MailHeaderCache {
         }
 
         var matches = 0
+        var inserted = 0
+        defer { trimIfNeeded() }
         for case let url as URL in enumerator {
-            if Date() >= deadline {
+            if Task.isCancelled || Date() >= deadline {
                 break
             }
             if url.pathExtension == "mbox" {
@@ -2041,13 +2062,14 @@ private actor MailHeaderCache {
                 continue
             }
             insert(record)
+            inserted += 1
             if let sender, record.emails.contains(sender) {
                 matches += 1
                 if let stopAfterMatches, matches >= stopAfterMatches {
                     break
                 }
             }
-            trimIfNeeded()
+            if inserted.isMultiple(of: 128) { trimIfNeeded() }
         }
     }
 
@@ -2172,14 +2194,14 @@ private actor MailHeaderCache {
         let messageLimit = max(10, limit - folderLimit)
         let messageCandidates = paths
             .compactMap { recordsByPath[$0] }
+            .map { ($0, score($0, terms: normalizedTerms) + MailSubjectMatch(context.subject, $0.subject ?? "").retrievalBoost) }
             .sorted { lhs, rhs in
-                let lhsScore = score(lhs, terms: normalizedTerms)
-                let rhsScore = score(rhs, terms: normalizedTerms)
-                if lhsScore == rhsScore {
-                    return (lhs.date ?? lhs.modifiedAt) > (rhs.date ?? rhs.modifiedAt)
+                if lhs.1 == rhs.1 {
+                    return (lhs.0.date ?? lhs.0.modifiedAt) > (rhs.0.date ?? rhs.0.modifiedAt)
                 }
-                return lhsScore > rhsScore
+                return lhs.1 > rhs.1
             }
+            .map(\.0)
             .prefix(messageLimit)
             .enumerated()
             .map { index, record in
@@ -2285,8 +2307,6 @@ private actor MailHeaderCache {
         let subject = (record.subject ?? "").lowercased()
         let mailbox = record.mailboxPath.joined(separator: " ").lowercased()
         let sender = (record.sender ?? "").lowercased()
-        let currentSubject = normalizedSubject(context.subject)
-        let recordSubject = normalizedSubject(record.subject ?? "")
         let currentSenderName = normalizedDisplayName(from: context.sender)
         let recordSenderName = normalizedDisplayName(from: record.sender ?? "")
 
@@ -2295,11 +2315,7 @@ private actor MailHeaderCache {
         let exactSender = !senderNeedle.isEmpty && record.emails.contains(senderNeedle)
         let displaySender = !currentSenderName.isEmpty && currentSenderName == recordSenderName
         let sameSender = exactSender || displaySender
-        if !currentSubject.isEmpty, currentSubject == recordSubject, sameSender {
-            score += 180
-        } else if !currentSubject.isEmpty, currentSubject == recordSubject {
-            score += 90
-        }
+        score += MailSubjectMatch(context.subject, record.subject ?? "").retrievalBoost
 
         for term in terms {
             if subject.contains(term) {
@@ -2321,25 +2337,7 @@ private actor MailHeaderCache {
     }
 
     private func normalizedSubject(_ value: String) -> String {
-        var subject = value.lowercased()
-        while true {
-            let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("re:") {
-                subject = String(trimmed.dropFirst(3))
-            } else if trimmed.hasPrefix("fw:") {
-                subject = String(trimmed.dropFirst(3))
-            } else if trimmed.hasPrefix("fwd:") {
-                subject = String(trimmed.dropFirst(4))
-            } else {
-                subject = trimmed
-                break
-            }
-        }
-        return subject
-            .replacingOccurrences(of: #"\[[^\]]+\]"#, with: " ", options: .regularExpression)
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { $0.count > 2 }
-            .joined(separator: " ")
+        MailSubjectMatch.normalized(value)
     }
 
     private func score(_ record: MailHeaderRecord, terms: Set<String>) -> Int {

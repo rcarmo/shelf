@@ -5,6 +5,7 @@ struct PermissionsView: View {
     @EnvironmentObject private var monitor: ContextMonitor
     @AppStorage(ShelfSettings.contentBaseFontSizeKey) private var contentBaseFontSize = ShelfSettings.defaultContentBaseFontSize
     @AppStorage(ShelfSettings.useAppleIntelligenceKey) private var useAppleIntelligence = false
+    @AppStorage(ShelfSettings.mailDecisionModeKey) private var mailDecisionMode = "off"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -17,6 +18,20 @@ struct PermissionsView: View {
                 .font(.title3.weight(.semibold))
 
             AppleIntelligenceControl(useAppleIntelligence: $useAppleIntelligence)
+                .disabled(mailDecisionMode != "off")
+
+            Picker("Folder assessments", selection: $mailDecisionMode) {
+                Text("Off").tag("off")
+                Text("Shadow").tag("shadow")
+                Text("Rerank (pending evaluation)").tag("rerank").disabled(!MailDecisionAdapter.rankingApproved)
+            }
+            Text(monitor.mailDecisionStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button(action: monitor.exportMailDecisionDiagnostics) {
+                Label("Export Assessments", systemImage: "square.and.arrow.up")
+            }
+            .disabled(monitor.mailDecisionRecords.isEmpty)
 
             Text("Permissions")
                 .font(.title3.weight(.semibold))
@@ -50,6 +65,7 @@ struct PermissionsView: View {
         .onChange(of: contentBaseFontSize) { newValue in
             contentBaseFontSize = ShelfSettings.clampedContentBaseFontSize(newValue)
         }
+        .onChange(of: mailDecisionMode) { _, _ in monitor.refresh() }
     }
 }
 
@@ -77,7 +93,7 @@ private struct FullDiskAccessControl: View {
             Text("Needed for local Mail headers and Safari Reading List and history lookup.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            Button(action: openFullDiskAccessSettings) {
+            Button(action: PrivacySettings.openFullDiskAccess) {
                 Label("Open Full Disk Access Settings", systemImage: "lock.open")
             }
         }
@@ -86,7 +102,10 @@ private struct FullDiskAccessControl: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private func openFullDiskAccessSettings() {
+}
+
+enum PrivacySettings {
+    static func openFullDiskAccess() {
         let candidates = [
             "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
             "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"

@@ -15,6 +15,9 @@ final class ContextExtractorRegistry {
         let name = application.localizedName ?? bundleIdentifier
 
         switch bundleIdentifier {
+        case SlackContextExtractor.bundleIdentifier:
+            // Slack's richer AX read is scheduled off the UI actor by ContextMonitor.
+            return nil
         case "com.apple.Safari":
             return browserHint(
                 appName: name,
@@ -89,7 +92,8 @@ final class ContextExtractorRegistry {
             sentDate: snapshot.sentDate,
             currentMailbox: snapshot.mailboxName,
             currentAccount: snapshot.accountName,
-            bodyPreview: snapshot.bodyPreview
+            bodyPreview: snapshot.bodyPreview,
+            selection: snapshot.selection
         )
         guard let email = snapshot.senderEmail else {
             return AppHint(
